@@ -1,0 +1,156 @@
+# -*- coding: utf-8 -*-
+import os
+import sys
+import json
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core.config import Config, DEFAULT_GROUPS, CONFIG_NAME, LEGACY_CONFIG_NAME  # noqa: E402
+from core.scanner import scan_folder, scan_depth_for, classify, FileEntry  # noqa: E402
+from core.demo import make_demo_project  # noqa: E402
+
+
+def entry(name, mtime, rel_dir=""):
+    return FileEntry(name, os.path.join("X:\\p", rel_dir, name), rel_dir, os.path.splitext(name)[1].lower(), mtime, 1)
+
+
+class ScanDepthTest(unittest.TestCase):
+    def test_depth_rule(self):
+        self.assertEqual(scan_depth_for("D:\\"), 0)
+        self.assertEqual(scan_depth_for("D:\\計畫案"), 2)
+        self.assertEqual(scan_depth_for("D:\\計畫案\\南40線"), 3)
+
+
+class ScanFolderTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def touch(self, *parts):
+        path = os.path.join(self.root, *parts)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        open(path, "wb").close()
+
+    def test_respects_depth(self):
+        self.touch("a.pdf")
+        self.touch("L1", "b.pdf")
+        self.touch("L1", "L2", "c.pdf")
+        self.touch("L1", "L2", "L3", "d.pdf")
+        names = {f.name for f in scan_folder(self.root, 2).files}
+        self.assertEqual(names, {"a.pdf", "b.pdf", "c.pdf"})
+
+    def test_rel_dir(self):
+        self.touch("設計", "審查", "紀錄.pdf")
+        (f,) = scan_folder(self.root, 3).files
+        self.assertEqual(f.rel_dir, os.path.join("設計", "審查"))
+        self.assertEqual(f.rel_path, os.path.join("設計", "審查", "紀錄.pdf"))
+
+    def test_skips_lock_files_and_hidden_dirs(self):
+        self.touch("~$報告.docx")
+        self.touch("Thumbs.db")
+        self.touch(".git", "x.pdf")
+        self.touch("$RECYCLE.BIN", "y.pdf")
+        self.touch("Windows備份", "z.pdf")   # 只略過名稱完全相同的系統資料夾
+        self.touch("報告.docx")
+        names = {f.name for f in scan_folder(self.root, 3).files}
+        self.assertEqual(names, {"報告.docx", "z.pdf"})
+
+    def test_unreadable_folder_is_reported(self):
+        res = scan_folder(os.path.join(self.root, "missing"), 2)
+        self.assertEqual(res.files, [])
+        self.assertEqual(len(res.unreadable), 1)
+
+    def test_cancel(self):
+        self.touch("a.pdf")
+        res = scan_folder(self.root, 2, cancelled=lambda: True)
+        self.assertTrue(res.cancelled)
+        self.assertEqual(res.files, [])
+
+
+class ClassifyTest(unittest.TestCase):
+    groups = [dict(g) for g in DEFAULT_GROUPS]
+
+    def test_groups_and_order(self):
+        files = [entry("舊.pdf", 1), entry("新.pdf", 3), entry("圖.dwg", 2), entry("說明.txt", 4)]
+        by_group, others = classify(files, self.groups, ["PDF 報告", "CAD 圖面"])
+        self.assertEqual([f.name for f in by_group["PDF 報告"]], ["新.pdf", "舊.pdf"])
+        self.assertEqual([f.name for f in by_group["CAD 圖面"]], ["圖.dwg"])
+        self.assertEqual([f.name for f in others], ["說明.txt"])
+
+    def test_unchecked_known_ext_not_in_others(self):
+        _, others = classify([entry("a.docx", 1)], self.groups, ["PDF 報告"])
+        self.assertEqual(others, [])
+
+    def test_ignored_ext_not_in_others(self):
+        _, others = classify([entry("a.dwl", 1), entry("b.shx", 1), entry("c.dbf", 1)], self.groups, [])
+        self.assertEqual([f.name for f in others], ["c.dbf"])
+
+    def test_query_matches_folder_and_name(self):
+        files = [entry("平面圖.dwg", 1, "02_設計"), entry("平面圖.dwg", 2, "舊版"), entry("縱斷面.dwg", 3, "02_設計")]
+        by_group, _ = classify(files, self.groups, ["CAD 圖面"], query="設計 平面")
+        self.assertEqual([(f.rel_dir, f.name) for f in by_group["CAD 圖面"]], [("02_設計", "平面圖.dwg")])
+
+    def test_query_is_case_insensitive(self):
+        by_group, _ = classify([entry("C3D_Report.PDF", 1)], self.groups, ["PDF 報告"], query="c3d report")
+        self.assertEqual(len(by_group["PDF 報告"]), 1)
+
+    def test_since(self):
+        by_group, _ = classify([entry("a.pdf", 10), entry("b.pdf", 20)], self.groups, ["PDF 報告"], since=15)
+        self.assertEqual([f.name for f in by_group["PDF 報告"]], ["b.pdf"])
+
+
+class ConfigTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_roundtrip(self):
+        c = Config(base_dir=self.dir)
+        c.favorites.append("D:\\計畫案")
+        group = c.add_extension("kmz")
+        self.assertIsNone(group)  # .kmz 已經在 GIS 分類裡
+        group = c.add_extension(".ifc")
+        self.assertEqual(group["exts"], [".ifc"])
+        c.group_states["PDF 報告"] = False
+        c.save()
+
+        c2 = Config(base_dir=self.dir)
+        self.assertEqual(c2.favorites, ["D:\\計畫案"])
+        names = {g["name"]: g["on"] for g in c2.groups()}
+        self.assertFalse(names["PDF 報告"])
+        self.assertTrue(names[".IFC 檔"])
+
+    def test_imports_legacy_favorites(self):
+        with open(os.path.join(self.dir, LEGACY_CONFIG_NAME), "w", encoding="utf-8") as f:
+            json.dump({"favorites": ["E:\\舊專案"]}, f, ensure_ascii=False)
+        c = Config(base_dir=self.dir)
+        self.assertEqual(c.favorites, ["E:\\舊專案"])
+        c.save()
+        self.assertTrue(os.path.exists(os.path.join(self.dir, CONFIG_NAME)))
+
+    def test_broken_config_falls_back_to_defaults(self):
+        with open(os.path.join(self.dir, CONFIG_NAME), "w", encoding="utf-8") as f:
+            f.write("{ 壞掉的 json")
+        c = Config(base_dir=self.dir)
+        self.assertEqual(c.favorites, [])
+
+
+class DemoProjectTest(unittest.TestCase):
+    def test_mtimes_are_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_demo_project(tmp)
+            res = scan_folder(root, 3)
+            years = {__import__("datetime").datetime.fromtimestamp(f.mtime).year for f in res.files}
+            self.assertEqual(years, {2024, 2025, 2026})
+
+
+if __name__ == "__main__":
+    unittest.main()
