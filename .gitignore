@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# PyInstaller
+build/
+build_tmp/
+dist/
+_dist_tmp/
+WingLightFinder_綠色免安裝版/
+*.zip
+
+# 個人設定與紀錄（含私人資料夾路徑，不可上傳）
+WingLightFinder.json
+explorer_config.json
+*.log
+
+# 截圖用的範例資料夾（由 tools/make_demo_folder.py 產生）
+demo_project/
