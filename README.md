@@ -27,6 +27,7 @@ WingLightFinder 把一個專案資料夾往下掃 2~3 層，**依軟體類型分
 
 | 功能 | 說明 |
 | :--- | :--- |
+| 🗂️ 分頁 | 像瀏覽器一樣開好幾個資料夾來回切換（Ctrl+T 新分頁、Ctrl+W 關閉、Ctrl+Tab 切換；在左邊資料夾上按中鍵或右鍵「在新分頁開啟」）。每個分頁各自記住搜尋字和時間篩選，下次開啟會還原 |
 | 📂 依類型分欄 | PDF、CAD 圖面、簡報、試算表各一欄（文件、圖片、GIS 圖資、影片、壓縮檔可自行勾選），也能加入自訂副檔名 |
 | 🕒 新到舊＋年份分隔 | 每欄依修改時間排序，跨年份時插入分隔列 |
 | 🔍 關鍵字搜尋 | 輸入「審查 紀錄」這類多個關鍵字，會同時比對子資料夾和檔名，所有欄位即時過濾 |
@@ -78,6 +79,7 @@ python main.py --self-test     # 自我測試（不顯示視窗）
 
 **WingLightFinder** is a portable, offline Windows tool for engineers who live in deep project folders. Point it at a project and it scans 2–3 levels down, then shows files **in columns by type (PDF, CAD, slides, spreadsheets …), newest first, with year separators** — so you can see what changed recently without knowing any file names.
 
+- Browser-style tabs to switch between project folders (Ctrl+T / Ctrl+W / Ctrl+Tab); each tab keeps its own search and time filter, and tabs are restored on next launch
 - Multi-keyword search across sub-folder and file names, time filters (today / 7 days / 30 days / this year)
 - Background scanning with per-folder cache; toggling columns or searching never re-reads the disk
 - Hover to see the sub-folder, right-click to copy paths or open the file location

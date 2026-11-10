@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core.config import Config, DEFAULT_GROUPS, CONFIG_NAME, LEGACY_CONFIG_NAME  # noqa: E402
 from core.scanner import scan_folder, scan_depth_for, classify, FileEntry  # noqa: E402
 from core.demo import make_demo_project  # noqa: E402
+from core.tabs import TabList  # noqa: E402
 
 
 def entry(name, mtime, rel_dir=""):
@@ -120,10 +121,14 @@ class ConfigTest(unittest.TestCase):
         group = c.add_extension(".ifc")
         self.assertEqual(group["exts"], [".ifc"])
         c.group_states["PDF 報告"] = False
+        c.tabs = ["D:\\計畫案", "E:\\南40線"]
+        c.active_tab = 1
         c.save()
 
         c2 = Config(base_dir=self.dir)
         self.assertEqual(c2.favorites, ["D:\\計畫案"])
+        self.assertEqual(c2.tabs, ["D:\\計畫案", "E:\\南40線"])
+        self.assertEqual(c2.active_tab, 1)
         names = {g["name"]: g["on"] for g in c2.groups()}
         self.assertFalse(names["PDF 報告"])
         self.assertTrue(names[".IFC 檔"])
@@ -141,6 +146,59 @@ class ConfigTest(unittest.TestCase):
             f.write("{ 壞掉的 json")
         c = Config(base_dir=self.dir)
         self.assertEqual(c.favorites, [])
+
+
+class TabListTest(unittest.TestCase):
+    def test_starts_with_one_blank_tab(self):
+        tabs = TabList()
+        self.assertEqual(len(tabs.tabs), 1)
+        self.assertEqual(tabs.current.title, "新分頁")
+
+    def test_restore_clamps_active(self):
+        tabs = TabList(["D:\\A", "D:\\B"], active=9)
+        self.assertEqual(tabs.active, 1)
+        self.assertEqual(tabs.current.title, "B")
+
+    def test_add_inserts_right_of_current(self):
+        tabs = TabList(["D:\\A", "D:\\B"], active=0)
+        index = tabs.add("D:\\C")
+        self.assertEqual(index, 1)
+        self.assertEqual([t.folder for t in tabs.tabs], ["D:\\A", "D:\\C", "D:\\B"])
+        self.assertEqual(tabs.active, 0)  # 新增不會自動切換
+
+    def test_close_keeps_sensible_active(self):
+        tabs = TabList(["D:\\A", "D:\\B", "D:\\C"], active=2)
+        tabs.close(2)                      # 關掉目前（最右邊）的分頁 → 左邊那個
+        self.assertEqual(tabs.current.folder, "D:\\B")
+        tabs.close(0)                      # 關掉左邊的分頁，目前分頁不變
+        self.assertEqual(tabs.current.folder, "D:\\B")
+        tabs.close(0)                      # 全部關掉時留一個空白分頁
+        self.assertEqual(len(tabs.tabs), 1)
+        self.assertEqual(tabs.current.folder, "")
+
+    def test_step_wraps(self):
+        tabs = TabList(["D:\\A", "D:\\B"], active=1)
+        tabs.step(1)
+        self.assertEqual(tabs.active, 0)
+        tabs.step(-1)
+        self.assertEqual(tabs.active, 1)
+
+    def test_tabs_keep_their_own_state(self):
+        tabs = TabList(["D:\\A", "D:\\B"])
+        tabs.tabs[0].query = "平面圖"
+        tabs.tabs[0].expanded.add("PDF 報告")
+        self.assertEqual(tabs.tabs[1].query, "")
+        self.assertEqual(tabs.tabs[1].expanded, set())
+
+    def test_saved_skips_blank_tabs(self):
+        tabs = TabList(["D:\\A"])
+        tabs.active = tabs.add("")         # 空白分頁
+        tabs.active = tabs.add("D:\\B")
+        self.assertEqual(tabs.saved_folders(), ["D:\\A", "D:\\B"])
+        self.assertEqual(tabs.saved_active(), 1)
+
+    def test_title_of_drive_root(self):
+        self.assertEqual(TabList(["D:\\"]).current.title, "D:\\")
 
 
 class DemoProjectTest(unittest.TestCase):

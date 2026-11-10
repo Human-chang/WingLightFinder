@@ -43,6 +43,8 @@ class Config:
         self.custom_groups = []   # 使用者用「+ 加入其他」新增的分類
         self.group_states = {}    # 分類名稱 → 是否勾選
         self.geometry = ""
+        self.tabs = []            # 上次開著的分頁（資料夾路徑）
+        self.active_tab = 0
         self.load()
 
     def load(self):
@@ -56,6 +58,9 @@ class Config:
         self.custom_groups = [g for g in data.get("custom_groups", []) if isinstance(g, dict) and g.get("exts")]
         self.group_states = {k: bool(v) for k, v in data.get("group_states", {}).items()}
         self.geometry = data.get("geometry", "") or ""
+        self.tabs = [p for p in data.get("tabs", []) if isinstance(p, str)]
+        active = data.get("active_tab", 0)
+        self.active_tab = active if isinstance(active, int) else 0
 
     @staticmethod
     def _read(path):
@@ -72,6 +77,8 @@ class Config:
             "custom_groups": self.custom_groups,
             "group_states": self.group_states,
             "geometry": self.geometry,
+            "tabs": self.tabs,
+            "active_tab": self.active_tab,
         }
         try:
             self._write(self.path, data)

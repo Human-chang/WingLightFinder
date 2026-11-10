@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 
 from core.config import Config, app_dir
 from core.scanner import scan_folder, scan_depth_for, classify
+from core.tabs import TabList
 from ui.icons import Icons
 
 APP_TITLE = "WingLightFinder — 專案檔案速查"
@@ -109,19 +110,19 @@ class FinderApp:
         self.nodes = {}             # 資料夾樹節點 → 路徑
         self.fav_node = None
         self.recent_node = None
-        self.current_folder = ""
-        self.cache = {}             # 資料夾 → ScanResult，切換分類、搜尋時不必重掃
-        self.scan_token = 0
-        self.pending = 0
+        self.tabset = TabList(self.config.tabs, self.config.active_tab)
+        self.cache = {}             # 資料夾 → ScanResult，所有分頁共用；切換分類、搜尋、分頁都不必重掃
+        self.scanning = set()       # 正在背景掃描的資料夾
+        self.polling = False
+        self.wanted = self.tabset.folders()  # 還有分頁在用的資料夾；沒人用的掃描會中途停止
         self.results = queue.Queue()
         self.columns = {}           # 欄 key → (frame, title label, tree, title)
         self.column_keys = None
-        self.expanded = set()       # 按過「顯示全部」的欄
         self.item_files = {}        # Treeview item id → FileEntry
         self.more_items = {}        # 「顯示全部」那一列 → 欄 key
         self.item_seq = 0
-        self.time_filter = None
         self.search_after = None
+        self.switching = False      # 切換分頁時還原搜尋字，不要當成使用者在打字
         self.wlpdf = find_winglightpdf()
 
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
@@ -138,12 +139,26 @@ class FinderApp:
             except tk.TclError:
                 pass
 
+        self.tip = HoverTip(root)
         self._setup_styles()
         self._build_ui()
-        self.tip = HoverTip(root)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-f>", lambda e: self._focus_search())
         root.bind("<F5>", lambda e: self.rescan())
+        root.bind_all("<Control-t>", lambda e: (self.new_tab(), "break")[1])
+        root.bind_all("<Control-w>", lambda e: (self.close_tab(self.tabset.active), "break")[1])
+        root.bind_all("<Control-Tab>", lambda e: (self._step_tab(1), "break")[1])
+        root.bind_all("<Control-Shift-Tab>", lambda e: (self._step_tab(-1), "break")[1])
+        if self.tab.folder:
+            root.after(50, lambda: self.open_folder(self.tab.folder))
+
+    @property
+    def tab(self):
+        return self.tabset.current
+
+    @property
+    def current_folder(self):
+        return self.tab.folder
 
     # ==========================================
     # 樣式與版面
@@ -252,13 +267,18 @@ class FinderApp:
         self.tree.heading("#0", text="專案與磁碟目錄", anchor="w")
         self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
+        self.tree.bind("<Button-2>", self._on_tree_middle_click)
+        self.tree.bind("<Button-3>", self._on_tree_right_click)
 
         self.right = tk.Frame(paned, bg=C["bg_main"])
         paned.add(self.right, weight=4)
+        self.tabbar = tk.Frame(self.right, bg=C["bg_main"])
+        self.tabbar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 2))
         self.grid_frame = None
         self._show_placeholder("從左邊選一個資料夾，或按「瀏覽目錄」")
 
         self._init_tree()
+        self._refresh_tab_bar()
 
     def _show_placeholder(self, text, icon=None):
         self._new_grid_frame()
@@ -329,11 +349,14 @@ class FinderApp:
         if not self.current_folder:
             self.set_status("先在左邊選一個資料夾，再加入最愛", warn=True)
             return
-        if self.current_folder not in self.config.favorites:
-            self.config.favorites.append(self.current_folder)
+        self._add_favorite_path(self.current_folder)
+
+    def _add_favorite_path(self, path):
+        if path not in self.config.favorites:
+            self.config.favorites.append(path)
             self._save_config()
             self._refresh_favorites()
-            self.set_status(f"已加入最愛：{self.current_folder}", icon="⭐")
+            self.set_status(f"已加入最愛：{path}", icon="⭐")
 
     def remove_favorite(self):
         sel = self.tree.selection()
@@ -384,49 +407,175 @@ class FinderApp:
         if sel and sel[0] in self.nodes:
             self.open_folder(self.nodes[sel[0]])
 
+    def _on_tree_middle_click(self, event):
+        node = self.tree.identify_row(event.y)
+        if node in self.nodes:
+            self.new_tab(self.nodes[node])
+
+    def _on_tree_right_click(self, event):
+        node = self.tree.identify_row(event.y)
+        path = self.nodes.get(node)
+        if not path:
+            return
+        menu = tk.Menu(self.root, tearoff=0, bg=C["bg_panel"], fg=C["fg_highlight"],
+                       activebackground=C["accent"], activeforeground=C["fg_highlight"], borderwidth=0,
+                       font=(FONT, 9))
+        menu.add_command(label=" 在新分頁開啟", image=self.icons.get("📂") or "", compound="left",
+                         command=lambda: self.new_tab(path))
+        menu.add_command(label=" 在目前分頁開啟", image=self.icons.get("📁") or "", compound="left",
+                         command=lambda: self.open_folder(path))
+        if path not in self.config.favorites:
+            menu.add_separator()
+            menu.add_command(label=" 加入最愛", image=self.icons.get("⭐") or "", compound="left",
+                             command=lambda: self._add_favorite_path(path))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    # ==========================================
+    # 分頁
+    # ==========================================
+    def _refresh_tab_bar(self):
+        for w in self.tabbar.winfo_children():
+            w.destroy()
+        for i, t in enumerate(self.tabset.tabs):
+            active = i == self.tabset.active
+            bg = C["bg_panel"] if active else C["bg_main"]
+            fg = C["fg_highlight"] if active else C["fg_dim"]
+            cell = tk.Frame(self.tabbar, bg=bg)
+            cell.pack(side=tk.LEFT, padx=(0, 2))
+            tk.Frame(cell, bg=C["accent"] if active else bg, height=2).pack(side=tk.TOP, fill=tk.X)
+            title = t.title if len(t.title) <= 18 else t.title[:17] + "…"
+            label = tk.Label(cell, text=f" {title}", image=self.icons.get("📂" if active else "📁") or "",
+                             compound="left", bg=bg, fg=fg, font=(FONT, 9), padx=8, pady=3, cursor="hand2")
+            label.pack(side=tk.LEFT)
+            close = tk.Label(cell, text="✕", bg=bg, fg=C["fg_dim"], font=(FONT, 8), padx=6, cursor="hand2")
+            close.pack(side=tk.LEFT)
+            tip = t.folder or "空白分頁：從左邊選一個資料夾"
+            for w in (cell, label):
+                w.bind("<Button-1>", lambda e, i=i: self.switch_tab(i))
+                w.bind("<Button-2>", lambda e, i=i: self.close_tab(i))
+                w.bind("<Enter>", lambda e, i=i, tip=tip: self.tip.schedule(("tab", i, tip), tip, e.x_root, e.y_root))
+                w.bind("<Leave>", lambda e: self.tip.hide())
+            close.bind("<Button-1>", lambda e, i=i: self.close_tab(i))
+            close.bind("<Enter>", lambda e, w=close: w.config(fg=C["fg_highlight"]))
+            close.bind("<Leave>", lambda e, w=close: w.config(fg=C["fg_dim"]))
+        plus = tk.Label(self.tabbar, text="＋", bg=C["bg_main"], fg=C["fg_text"], font=(FONT, 10), padx=8,
+                        cursor="hand2")
+        plus.pack(side=tk.LEFT)
+        plus.bind("<Button-1>", lambda e: self.new_tab())
+        plus.bind("<Enter>", lambda e: self.tip.schedule(("tab", "+"), "新分頁（Ctrl+T）", e.x_root, e.y_root))
+        plus.bind("<Leave>", lambda e: self.tip.hide())
+
+    def _remember_tab_state(self):
+        self.tab.query = self.search_var.get()
+
+    def _show_tab(self):
+        """把目前分頁的搜尋字、時間篩選與資料夾顯示出來。"""
+        self.tip.hide()
+        self.switching = True
+        self.search_var.set(self.tab.query)
+        self.switching = False
+        self._refresh_time_buttons()
+        self._refresh_tab_bar()
+        # 清掉左邊樹的選取，再點同一個資料夾才會觸發開啟
+        self.tree.selection_set(())
+        if self.tab.folder:
+            self.open_folder(self.tab.folder)
+        else:
+            self._show_placeholder("從左邊選一個資料夾，或按「瀏覽目錄」")
+            self.set_status("空白分頁：從左邊選一個資料夾")
+
+    def switch_tab(self, index):
+        if index == self.tabset.active or not 0 <= index < len(self.tabset.tabs):
+            return
+        self._remember_tab_state()
+        self.tabset.active = index
+        self._show_tab()
+
+    def _step_tab(self, delta):
+        if len(self.tabset.tabs) > 1:
+            self._remember_tab_state()
+            self.tabset.step(delta)
+            self._show_tab()
+
+    def new_tab(self, folder=""):
+        self._remember_tab_state()
+        self.tabset.active = self.tabset.add(folder)
+        self._tabs_changed()
+        self._show_tab()
+
+    def close_tab(self, index):
+        self._remember_tab_state()
+        was_active = index == self.tabset.active
+        self.tabset.close(index)
+        self._tabs_changed()
+        if was_active:
+            self._show_tab()
+        else:
+            self._refresh_tab_bar()
+
+    def _tabs_changed(self):
+        self.wanted = self.tabset.folders()
+        self.config.tabs = self.tabset.saved_folders()
+        self.config.active_tab = self.tabset.saved_active()
+        self._save_config()
+
     # ==========================================
     # 掃描（背景執行緒）
     # ==========================================
     def open_folder(self, path, force=False):
-        self.current_folder = path
-        self.expanded.clear()
-        if not force and path in self.cache:
+        """在目前分頁開啟資料夾；已經掃過的直接顯示。"""
+        if self.tab.folder != path:
+            self.tab.folder = path
+            self.tab.expanded.clear()
+            self._tabs_changed()
+            self._refresh_tab_bar()
+        if path in self.cache and not force:
             self.render()
             return
-        self.scan_token += 1
-        token = self.scan_token
         depth = scan_depth_for(path)
         self.set_status(f"掃描中…　{path}（深度 {depth}）", icon="⏳")
         self._show_placeholder("掃描中…", icon="⏳")
+        if path in self.scanning:
+            return
 
         def work():
-            res = scan_folder(path, depth, cancelled=lambda: token != self.scan_token)
-            self.results.put((token, path, res))
+            res = scan_folder(path, depth, cancelled=lambda: path not in self.wanted)
+            self.results.put((path, res))
 
-        self.pending += 1
+        self.scanning.add(path)
         threading.Thread(target=work, daemon=True).start()
-        if self.pending == 1:
+        if not self.polling:
+            self.polling = True
             self.root.after(40, self._poll_results)
 
     def _poll_results(self):
         while True:
             try:
-                token, path, res = self.results.get_nowait()
+                path, res = self.results.get_nowait()
             except queue.Empty:
                 break
-            self.pending -= 1
+            self.scanning.discard(path)
             if res.cancelled:
+                # 分頁關掉後掃描已經停了，但同一個資料夾又被重新開啟：重掃一次
+                if path == self.current_folder:
+                    self.open_folder(path)
                 continue
             self.cache[path] = res
-            if token == self.scan_token and path == self.current_folder:
+            if path == self.current_folder:
                 self.render()
-        if self.pending > 0:
+        if self.scanning:
             self.root.after(40, self._poll_results)
+        else:
+            self.polling = False
 
     def rescan(self):
-        if self.current_folder:
-            self.cache.pop(self.current_folder, None)
-            self.open_folder(self.current_folder, force=True)
+        path = self.current_folder
+        if path and path not in self.scanning:
+            self.cache.pop(path, None)
+            self.open_folder(path, force=True)
 
     # ==========================================
     # 分類、搜尋、時間篩選
@@ -464,17 +613,17 @@ class FinderApp:
         self.render()
 
     def set_time_filter(self, value):
-        self.time_filter = value
+        self.tab.time_filter = value
         self._refresh_time_buttons()
         self.render()
 
     def _refresh_time_buttons(self):
         for value, btn in self.time_buttons.items():
-            on = value == self.time_filter
+            on = value == self.tab.time_filter
             btn.config(bg=C["accent"] if on else C["bg_element"], fg=C["fg_highlight"] if on else C["fg_text"])
 
     def _since(self):
-        v, now = self.time_filter, datetime.now()
+        v, now = self.tab.time_filter, datetime.now()
         if v is None:
             return None
         if v == "today":
@@ -484,13 +633,16 @@ class FinderApp:
         return (now - timedelta(days=v)).timestamp()
 
     def _on_search_changed(self, *args):
+        if self.switching:
+            return
         if self.search_after:
             self.root.after_cancel(self.search_after)
         self.search_after = self.root.after(200, self._apply_search)
 
     def _apply_search(self):
         self.search_after = None
-        self.expanded.clear()
+        self.tab.query = self.search_var.get()
+        self.tab.expanded.clear()
         self.render()
 
     # ==========================================
@@ -593,7 +745,7 @@ class FinderApp:
             return
         image = self.icons.get(icon) or self.icons.get("📁") or ""
         calendar = self.icons.get("📅") or ""
-        limit = len(files) if key in self.expanded else page
+        limit = len(files) if key in self.tab.expanded else page
         year = None
         for f in files[:limit]:
             dt = datetime.fromtimestamp(f.mtime)
@@ -614,7 +766,7 @@ class FinderApp:
     def _on_file_click(self, event):
         iid = event.widget.identify_row(event.y)
         if iid in self.more_items:
-            self.expanded.add(self.more_items[iid])
+            self.tab.expanded.add(self.more_items[iid])
             self.render()
 
     def _on_file_activate(self, event):
@@ -725,5 +877,7 @@ class FinderApp:
 
     def on_close(self):
         self.config.geometry = self.root.geometry()
+        self.config.tabs = self.tabset.saved_folders()
+        self.config.active_tab = self.tabset.saved_active()
         self._save_config()
         self.root.destroy()

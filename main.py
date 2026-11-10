@@ -69,13 +69,16 @@ def run_self_test(result_path=None) -> int:
             root = tk.Tk()
             root.withdraw()
             try:
+                def wait(done):
+                    for _ in range(400):
+                        root.update()
+                        if done():
+                            return
+                        root.after(25)
+
                 app = FinderApp(root, Config(base_dir=tmp))
                 app.open_folder(project)
-                for _ in range(400):
-                    root.update()
-                    if project in app.cache and app.column_keys:
-                        break
-                    root.after(25)
+                wait(lambda: project in app.cache and app.column_keys)
                 on_groups = [g["name"] for g in DEFAULT_GROUPS if g["default_on"]]
                 check("介面建立預設分欄", app.column_keys == on_groups + [OTHERS_KEY], app.column_keys)
                 pdf_rows = [f.name for f in app.item_files.values() if f.ext == ".pdf"]
@@ -90,6 +93,26 @@ def run_self_test(result_path=None) -> int:
                 app.config.favorites.append(project)
                 app._save_config()
                 check("設定檔存在程式旁邊", Config(base_dir=tmp).favorites == [project], app.config.path)
+
+                # 分頁：新分頁開子資料夾，各分頁的搜尋字互不影響
+                sub = os.path.join(project, "02_設計")
+                app.new_tab(sub)
+                wait(lambda: sub in app.cache and app.column_keys)
+                check("新分頁開啟子資料夾", app.tabset.active == 1 and app.current_folder == sub, app.current_folder)
+                check("新分頁的搜尋字是空的", app.search_var.get() == "", app.search_var.get())
+                check("新分頁只列子資料夾裡的檔案",
+                      app.item_files and all(f.path.startswith(sub) for f in app.item_files.values()),
+                      sorted(f.rel_path for f in app.item_files.values()))
+                app.switch_tab(0)
+                root.update()
+                check("切回第一個分頁，搜尋字和結果都還在",
+                      app.search_var.get() == "審查" and app.item_files
+                      and all("審查" in f.rel_path for f in app.item_files.values()),
+                      sorted(f.rel_path for f in app.item_files.values()))
+                check("分頁存進設定檔", Config(base_dir=tmp).tabs == [project, sub], Config(base_dir=tmp).tabs)
+                app.close_tab(1)
+                check("關閉分頁", len(app.tabset.tabs) == 1 and app.current_folder == project)
+                check("關閉後設定檔跟著更新", Config(base_dir=tmp).tabs == [project], Config(base_dir=tmp).tabs)
             finally:
                 root.destroy()
     except Exception:
@@ -119,7 +142,9 @@ def main():
     root = tk.Tk()
     app = FinderApp(root)
     if args and os.path.isdir(args[0]):
-        root.after(100, lambda: app.open_folder(os.path.normpath(args[0])))
+        # 指定的資料夾開在新分頁，不蓋掉上次留下來的分頁
+        folder = os.path.normpath(args[0])
+        root.after(100, lambda: app.new_tab(folder) if app.tab.folder else app.open_folder(folder))
     root.mainloop()
 
 
