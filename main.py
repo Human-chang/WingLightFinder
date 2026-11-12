@@ -80,7 +80,7 @@ def run_self_test(result_path=None) -> int:
                 app.open_folder(project)
                 wait(lambda: project in app.cache and app.column_keys)
                 on_groups = [g["name"] for g in DEFAULT_GROUPS if g["default_on"]]
-                check("介面建立預設分欄", app.column_keys == on_groups + [OTHERS_KEY], app.column_keys)
+                check("介面建立預設分欄（「其他」預設不顯示）", app.column_keys == on_groups, app.column_keys)
                 pdf_rows = [f.name for f in app.item_files.values() if f.ext == ".pdf"]
                 check("介面列出 PDF 檔", len(pdf_rows) == len(pdfs), pdf_rows)
 
@@ -93,6 +93,9 @@ def run_self_test(result_path=None) -> int:
                 app.config.favorites.append(project)
                 app._save_config()
                 check("設定檔存在程式旁邊", Config(base_dir=tmp).favorites == [project], app.config.path)
+                app._remove_favorite_path(project)
+                check("移除最愛", Config(base_dir=tmp).favorites == [] and not app.tree.get_children(app.fav_node),
+                      Config(base_dir=tmp).favorites)
 
                 # 分頁：新分頁開子資料夾，各分頁的搜尋字互不影響
                 sub = os.path.join(project, "02_設計")
@@ -113,6 +116,51 @@ def run_self_test(result_path=None) -> int:
                 app.close_tab(1)
                 check("關閉分頁", len(app.tabset.tabs) == 1 and app.current_folder == project)
                 check("關閉後設定檔跟著更新", Config(base_dir=tmp).tabs == [project], Config(base_dir=tmp).tabs)
+
+                app.others_var.set(True)
+                app._on_others_toggled()
+                check("勾選「其他」後才出現其他欄", app.column_keys == on_groups + [OTHERS_KEY], app.column_keys)
+
+                # 自動更新：資料夾裡多了檔案，背景重掃後畫面跟著更新
+                app.search_var.set("")
+                app._apply_search()
+                with open(os.path.join(sub, "新增的平面圖.pdf"), "wb"):
+                    pass
+                app.refresh_quietly(project, min_age=0)
+                wait(lambda: any(f.name == "新增的平面圖.pdf" for f in app.item_files.values()))
+                status = app.status.cget("text")
+                check("背景重掃後出現新增的檔案",
+                      any(f.name == "新增的平面圖.pdf" for f in app.item_files.values()), status)
+                check("狀態列說明自動更新了什麼", "已自動更新：新增 1 個" in status, status)
+
+                # 釘選：存進設定檔、不能關、從左邊開資料夾會開在新分頁
+                app.set_tab_pinned(0, True)
+                saved = Config(base_dir=tmp)
+                check("釘選的分頁另外存", saved.pinned_tabs == [project] and saved.tabs == [],
+                      (saved.pinned_tabs, saved.tabs))
+                app.close_tab(0)
+                check("釘選的分頁不能關", len(app.tabset.tabs) == 1 and app.tab.pinned)
+                app.open_from_tree(sub)
+                wait(lambda: sub in app.cache and app.column_keys)
+                folders = [t.folder for t in app.tabset.tabs]
+                check("釘選分頁裡從左邊開資料夾會開在新分頁",
+                      folders == [project, sub] and app.tabset.active == 1, folders)
+
+                # 不記住上次畫面：下次開啟只剩釘選的分頁
+                app.entry_ext.insert(0, ".ifc")
+                app.add_extension()
+                app.remember_var.set(False)
+                app._on_remember_toggled()
+                root2 = tk.Tk()
+                root2.withdraw()
+                try:
+                    app2 = FinderApp(root2, Config(base_dir=tmp))
+                    folders = [t.folder for t in app2.tabset.tabs]
+                    names = [g["name"] for g in app2.groups]
+                    check("不記住上次畫面時只打開釘選的分頁", folders == [project], folders)
+                    check("不記住上次畫面時不保留加入的副檔名", ".IFC 檔" not in names, names)
+                finally:
+                    root2.destroy()
             finally:
                 root.destroy()
     except Exception:

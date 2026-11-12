@@ -43,8 +43,10 @@ class Config:
         self.custom_groups = []   # 使用者用「+ 加入其他」新增的分類
         self.group_states = {}    # 分類名稱 → 是否勾選
         self.geometry = ""
-        self.tabs = []            # 上次開著的分頁（資料夾路徑）
-        self.active_tab = 0
+        self.tabs = []            # 上次開著的一般分頁（資料夾路徑）
+        self.pinned_tabs = []     # 釘選的分頁：每次開啟都會打開
+        self.active_tab = 0       # 在「釘選＋一般分頁」裡的位置
+        self.remember_session = True  # 關掉時，下次開啟只打開釘選的分頁，也不保留加入的副檔名
         self.load()
 
     def load(self):
@@ -59,8 +61,10 @@ class Config:
         self.group_states = {k: bool(v) for k, v in data.get("group_states", {}).items()}
         self.geometry = data.get("geometry", "") or ""
         self.tabs = [p for p in data.get("tabs", []) if isinstance(p, str)]
+        self.pinned_tabs = [p for p in data.get("pinned_tabs", []) if isinstance(p, str) and p]
         active = data.get("active_tab", 0)
         self.active_tab = active if isinstance(active, int) else 0
+        self.remember_session = data.get("remember_session", True) is not False
 
     @staticmethod
     def _read(path):
@@ -72,13 +76,16 @@ class Config:
             return None
 
     def save(self):
+        remember = self.remember_session
         data = {
             "favorites": self.favorites,
-            "custom_groups": self.custom_groups,
+            "custom_groups": self.custom_groups if remember else [],
             "group_states": self.group_states,
             "geometry": self.geometry,
-            "tabs": self.tabs,
-            "active_tab": self.active_tab,
+            "pinned_tabs": self.pinned_tabs,
+            "tabs": self.tabs if remember else [],
+            "active_tab": self.active_tab if remember else 0,
+            "remember_session": remember,
         }
         try:
             self._write(self.path, data)

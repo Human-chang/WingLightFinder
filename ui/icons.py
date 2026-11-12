@@ -13,7 +13,7 @@ import tkinter as tk
 from core.config import app_dir
 
 SIZES = (16, 20, 24, 32)
-EMOJI = "📁📂⭐❌🔄🔍🕒📄📐📊📈📝📷📍🎬📦📌💻🌐🕘📅📋📑⚡⚠⏳▶"
+EMOJI = "📁📂⭐❌🔄🔍🕒📄📐📊📈📝📷📍🎬📦📌📎💻🌐🕘📅📋📑⚡⚠⏳▶"
 
 
 def icon_dir():

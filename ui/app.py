@@ -3,6 +3,7 @@
 
 import os
 import sys
+import time
 import queue
 import string
 import ctypes
@@ -24,7 +25,10 @@ FONT = "Microsoft JhengHei"
 PAGE_SIZE = 100          # 每欄先列出的筆數，其餘按「顯示全部」再展開
 OTHERS_PAGE_SIZE = 25
 OTHERS_KEY = "__others__"
-OTHERS_ICON = "📌"
+OTHERS_NAME = "其他"       # 不在任何分類裡的檔案；預設不顯示，在「顯示分類」勾選
+OTHERS_ICON = "📎"
+REFRESH_MIN_AGE = 3        # 秒：剛掃過的資料夾不重掃
+AUTO_REFRESH_MS = 30_000   # 視窗開著時，每 30 秒在背景重掃目前的資料夾
 
 C = {
     "bg_main": "#1e1e1e",
@@ -65,6 +69,19 @@ def format_size(n):
     if n >= 1024 * 1024:
         return f"{n / 1024 / 1024:.2f} MB"
     return f"{n / 1024:.1f} KB"
+
+
+def _change_note(old, new):
+    """比對兩次掃描結果：有變動時回傳狀態列的說明，沒有變動回傳空字串。"""
+    before = {f.path: (f.mtime, f.size) for f in old.files}
+    after = {f.path: (f.mtime, f.size) for f in new.files}
+    added = len(after.keys() - before.keys())
+    removed = len(before.keys() - after.keys())
+    modified = sum(1 for p in after.keys() & before.keys() if after[p] != before[p])
+    if not (added or removed or modified) and old.unreadable == new.unreadable:
+        return ""
+    parts = [f"{label} {n} 個" for label, n in (("新增", added), ("修改", modified), ("移除", removed)) if n]
+    return "已自動更新" + ("：" + "、".join(parts) if parts else "")
 
 
 class HoverTip:
@@ -110,10 +127,16 @@ class FinderApp:
         self.nodes = {}             # 資料夾樹節點 → 路徑
         self.fav_node = None
         self.recent_node = None
-        self.tabset = TabList(self.config.tabs, self.config.active_tab)
-        self.cache = {}             # 資料夾 → ScanResult，所有分頁共用；切換分類、搜尋、分頁都不必重掃
+        remember = self.config.remember_session
+        self.tabset = TabList(self.config.tabs if remember else [], self.config.active_tab if remember else 0,
+                              pinned=self.config.pinned_tabs)
+        self.cache = {}             # 資料夾 → ScanResult，所有分頁共用；先顯示上次的結果，再在背景重掃
+        self.scanned_at = {}        # 資料夾 → 上次掃完的時間（time.monotonic）
         self.scanning = set()       # 正在背景掃描的資料夾
         self.polling = False
+        self.app_active = True      # 切到別的程式時變成 False，切回來就重掃目前的資料夾
+        self.drag = None            # 拖曳分頁中的狀態
+        self.tab_cells = []
         self.wanted = self.tabset.folders()  # 還有分頁在用的資料夾；沒人用的掃描會中途停止
         self.results = queue.Queue()
         self.columns = {}           # 欄 key → (frame, title label, tree, title)
@@ -140,6 +163,8 @@ class FinderApp:
                 pass
 
         self.tip = HoverTip(root)
+        self.others_var = tk.BooleanVar(value=self.config.group_states.get(OTHERS_NAME, False))
+        self.remember_var = tk.BooleanVar(value=remember)
         self._setup_styles()
         self._build_ui()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -149,6 +174,10 @@ class FinderApp:
         root.bind_all("<Control-w>", lambda e: (self.close_tab(self.tabset.active), "break")[1])
         root.bind_all("<Control-Tab>", lambda e: (self._step_tab(1), "break")[1])
         root.bind_all("<Control-Shift-Tab>", lambda e: (self._step_tab(-1), "break")[1])
+        # Windows 上的 Tk 不會送 <Activate>，用焦點進出判斷使用者是不是切到別的程式又切回來
+        root.bind("<FocusOut>", lambda e: root.after_idle(self._check_app_inactive))
+        root.bind("<FocusIn>", self._on_focus_in)
+        root.after(AUTO_REFRESH_MS, self._auto_refresh)
         if self.tab.folder:
             root.after(50, lambda: self.open_folder(self.tab.folder))
 
@@ -206,6 +235,14 @@ class FinderApp:
         return tk.Entry(parent, bg=C["bg_main"], fg=C["fg_highlight"], insertbackground=C["fg_highlight"],
                         relief=tk.FLAT, font=(FONT, 10), **kw)
 
+    def _checkbox(self, parent, text, variable, command, icon=None):
+        image = self.icons.get(icon)
+        return tk.Checkbutton(parent, text=f" {text}" if image else text, image=image or "", compound="left",
+                              variable=variable, command=command,
+                              bg=C["bg_panel"], fg=C["fg_text"], selectcolor=C["bg_element"],
+                              activebackground=C["bg_panel"], activeforeground=C["fg_highlight"],
+                              font=(FONT, 9))
+
     def _build_ui(self):
         top = tk.Frame(self.root, bg=C["bg_panel"], padx=10, pady=8)
         top.pack(side=tk.TOP, fill=tk.X)
@@ -235,6 +272,12 @@ class FinderApp:
             btn.pack(side=tk.LEFT, padx=1)
             self.time_buttons[value] = btn
         self._refresh_time_buttons()
+
+        remember = self._checkbox(row1, "記住上次畫面", self.remember_var, self._on_remember_toggled)
+        remember.pack(side=tk.RIGHT, padx=3)
+        tip = "勾選：下次開啟還原這次開著的分頁和加入的副檔名\n不勾：下次開啟只打開釘選的分頁"
+        remember.bind("<Enter>", lambda e: self.tip.schedule("remember", tip, e.x_root, e.y_root))
+        remember.bind("<Leave>", lambda e: self.tip.hide())
 
         # 第二列：分類
         row2 = tk.Frame(top, bg=C["bg_panel"])
@@ -363,7 +406,9 @@ class FinderApp:
         if not sel or self.tree.parent(sel[0]) != self.fav_node:
             self.set_status("請先在「我的最愛」底下選一個資料夾", warn=True)
             return
-        path = self.nodes.get(sel[0])
+        self._remove_favorite_path(self.nodes.get(sel[0]))
+
+    def _remove_favorite_path(self, path):
         if path in self.config.favorites:
             self.config.favorites.remove(path)
             self._save_config()
@@ -405,7 +450,14 @@ class FinderApp:
     def _on_tree_select(self, event):
         sel = self.tree.selection()
         if sel and sel[0] in self.nodes:
-            self.open_folder(self.nodes[sel[0]])
+            self.open_from_tree(self.nodes[sel[0]])
+
+    def open_from_tree(self, path):
+        """從左邊開資料夾；目前是釘選的分頁時開在新分頁，不要換掉釘選的路徑。"""
+        if self.tab.pinned and path != self.tab.folder:
+            self.new_tab(path)
+        else:
+            self.open_folder(path)
 
     def _on_tree_middle_click(self, event):
         node = self.tree.identify_row(event.y)
@@ -422,10 +474,14 @@ class FinderApp:
                        font=(FONT, 9))
         menu.add_command(label=" 在新分頁開啟", image=self.icons.get("📂") or "", compound="left",
                          command=lambda: self.new_tab(path))
-        menu.add_command(label=" 在目前分頁開啟", image=self.icons.get("📁") or "", compound="left",
-                         command=lambda: self.open_folder(path))
-        if path not in self.config.favorites:
-            menu.add_separator()
+        if not self.tab.pinned:
+            menu.add_command(label=" 在目前分頁開啟", image=self.icons.get("📁") or "", compound="left",
+                             command=lambda: self.open_folder(path))
+        menu.add_separator()
+        if path in self.config.favorites:
+            menu.add_command(label=" 移除最愛", image=self.icons.get("❌") or "", compound="left",
+                             command=lambda: self._remove_favorite_path(path))
+        else:
             menu.add_command(label=" 加入最愛", image=self.icons.get("⭐") or "", compound="left",
                              command=lambda: self._add_favorite_path(path))
         try:
@@ -439,34 +495,136 @@ class FinderApp:
     def _refresh_tab_bar(self):
         for w in self.tabbar.winfo_children():
             w.destroy()
+        self.tab_cells = []
         for i, t in enumerate(self.tabset.tabs):
             active = i == self.tabset.active
             bg = C["bg_panel"] if active else C["bg_main"]
             fg = C["fg_highlight"] if active else C["fg_dim"]
             cell = tk.Frame(self.tabbar, bg=bg)
             cell.pack(side=tk.LEFT, padx=(0, 2))
-            tk.Frame(cell, bg=C["accent"] if active else bg, height=2).pack(side=tk.TOP, fill=tk.X)
+            stripe = tk.Frame(cell, bg=C["accent"] if active else bg, height=2)
+            stripe.pack(side=tk.TOP, fill=tk.X)
             title = t.title if len(t.title) <= 18 else t.title[:17] + "…"
-            label = tk.Label(cell, text=f" {title}", image=self.icons.get("📂" if active else "📁") or "",
+            icon = "📌" if t.pinned else "📂" if active else "📁"
+            label = tk.Label(cell, text=f" {title}", image=self.icons.get(icon) or "",
                              compound="left", bg=bg, fg=fg, font=(FONT, 9), padx=8, pady=3, cursor="hand2")
             label.pack(side=tk.LEFT)
-            close = tk.Label(cell, text="✕", bg=bg, fg=C["fg_dim"], font=(FONT, 8), padx=6, cursor="hand2")
-            close.pack(side=tk.LEFT)
-            tip = t.folder or "空白分頁：從左邊選一個資料夾"
-            for w in (cell, label):
-                w.bind("<Button-1>", lambda e, i=i: self.switch_tab(i))
+            if t.pinned:
+                # 釘選的分頁沒有關閉鈕，右邊留一點空間讓寬度接近一般分頁
+                tk.Frame(cell, bg=bg, width=6).pack(side=tk.LEFT)
+                tip = f"{t.folder}\n已釘選：每次開啟都會打開（右鍵可取消釘選）"
+            else:
+                close = tk.Label(cell, text="✕", bg=bg, fg=C["fg_dim"], font=(FONT, 8), padx=6, cursor="hand2")
+                close.pack(side=tk.LEFT)
+                close.bind("<Button-1>", lambda e, i=i: self.close_tab(i))
+                close.bind("<Enter>", lambda e, w=close: w.config(fg=C["fg_highlight"]))
+                close.bind("<Leave>", lambda e, w=close: w.config(fg=C["fg_dim"]))
+                tip = t.folder or "空白分頁：從左邊選一個資料夾"
+            for w in (cell, stripe, label):
+                w.bind("<ButtonPress-1>", lambda e, i=i: self._tab_press(e, i))
+                w.bind("<B1-Motion>", self._tab_drag)
+                w.bind("<ButtonRelease-1>", self._tab_release)
                 w.bind("<Button-2>", lambda e, i=i: self.close_tab(i))
-                w.bind("<Enter>", lambda e, i=i, tip=tip: self.tip.schedule(("tab", i, tip), tip, e.x_root, e.y_root))
+                w.bind("<Button-3>", lambda e, i=i: self._tab_menu(e, i))
+                w.bind("<Enter>", lambda e, i=i, tip=tip: self.drag or self.tip.schedule(
+                    ("tab", i, tip), tip, e.x_root, e.y_root))
                 w.bind("<Leave>", lambda e: self.tip.hide())
-            close.bind("<Button-1>", lambda e, i=i: self.close_tab(i))
-            close.bind("<Enter>", lambda e, w=close: w.config(fg=C["fg_highlight"]))
-            close.bind("<Leave>", lambda e, w=close: w.config(fg=C["fg_dim"]))
+            self.tab_cells.append(cell)
         plus = tk.Label(self.tabbar, text="＋", bg=C["bg_main"], fg=C["fg_text"], font=(FONT, 10), padx=8,
                         cursor="hand2")
         plus.pack(side=tk.LEFT)
         plus.bind("<Button-1>", lambda e: self.new_tab())
         plus.bind("<Enter>", lambda e: self.tip.schedule(("tab", "+"), "新分頁（Ctrl+T）", e.x_root, e.y_root))
         plus.bind("<Leave>", lambda e: self.tip.hide())
+        self.drop_marker = tk.Frame(self.tabbar, bg=C["link"], width=3)
+
+    # 拖曳分頁：按下時先記住，移動超過一點點才算拖曳，放開時沒拖曳就當成點一下
+    def _tab_press(self, event, index):
+        self.tip.hide()
+        self.drag = {"index": index, "x": event.x_root, "target": None, "widget": event.widget}
+
+    def _tab_drag(self, event):
+        d = self.drag
+        if not d:
+            return
+        if d["target"] is None:
+            if abs(event.x_root - d["x"]) < 8 * self.scale:
+                return
+            d["widget"].config(cursor="sb_h_double_arrow")
+        target = len(self.tab_cells)
+        for i, cell in enumerate(self.tab_cells):
+            if event.x_root < cell.winfo_rootx() + cell.winfo_width() / 2:
+                target = i
+                break
+        target = self.tabset.drop_position(d["index"], target)
+        d["target"] = target
+        if target < len(self.tab_cells):
+            x = self.tab_cells[target].winfo_x() - 2
+        else:
+            last = self.tab_cells[-1]
+            x = last.winfo_x() + last.winfo_width()
+        self.drop_marker.place(x=max(x, 0), y=0, relheight=1)
+        self.drop_marker.lift()
+
+    def _tab_release(self, event):
+        d, self.drag = self.drag, None
+        if not d:
+            return
+        self.drop_marker.place_forget()
+        if d["target"] is None:
+            self.switch_tab(d["index"])
+            return
+        try:
+            d["widget"].config(cursor="hand2")
+        except tk.TclError:
+            pass
+        self._remember_tab_state()
+        self.tabset.move(d["index"], d["target"])
+        self._tabs_changed()
+        self._refresh_tab_bar()
+
+    def _tab_menu(self, event, index):
+        self.tip.hide()
+        t = self.tabset.tabs[index]
+        menu = tk.Menu(self.root, tearoff=0, bg=C["bg_panel"], fg=C["fg_highlight"],
+                       activebackground=C["accent"], activeforeground=C["fg_highlight"], borderwidth=0,
+                       font=(FONT, 9))
+
+        def item(label, icon, command, enabled=True):
+            menu.add_command(label=f" {label}", image=self.icons.get(icon) or "", compound="left", command=command,
+                             state=tk.NORMAL if enabled else tk.DISABLED)
+
+        if t.pinned:
+            item("取消釘選", "📌", lambda: self.set_tab_pinned(index, False))
+        else:
+            item("釘選分頁（每次開啟都會打開）", "📌", lambda: self.set_tab_pinned(index, True), enabled=bool(t.folder))
+        if t.folder:
+            item("用檔案總管開啟", "📂", lambda: self.open_in_explorer(t.folder))
+            if t.folder not in self.config.favorites:
+                item("加入最愛", "⭐", lambda: self._add_favorite_path(t.folder))
+        menu.add_separator()
+        item("關閉分頁", "❌", lambda: self.close_tab(index), enabled=not t.pinned)
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def set_tab_pinned(self, index, pinned):
+        folder = self.tabset.tabs[index].folder
+        if not self.tabset.set_pinned(index, pinned):
+            return
+        self._tabs_changed()
+        self._refresh_tab_bar()
+        if pinned:
+            self.set_status(f"已釘選：{folder}　｜　每次開啟都會打開這個分頁", icon="📌")
+        else:
+            self.set_status(f"已取消釘選：{folder}", icon="📌")
+
+    def open_in_explorer(self, folder):
+        try:
+            os.startfile(folder)
+        except OSError as e:
+            messagebox.showerror("無法開啟", f"{folder}\n\n{e}")
 
     def _remember_tab_state(self):
         self.tab.query = self.search_var.get()
@@ -507,6 +665,9 @@ class FinderApp:
         self._show_tab()
 
     def close_tab(self, index):
+        if self.tabset.tabs[index].pinned:
+            self.set_status("釘選的分頁要先取消釘選才能關閉（在分頁上按右鍵）", warn=True)
+            return
         self._remember_tab_state()
         was_active = index == self.tabset.active
         self.tabset.close(index)
@@ -518,15 +679,19 @@ class FinderApp:
 
     def _tabs_changed(self):
         self.wanted = self.tabset.folders()
-        self.config.tabs = self.tabset.saved_folders()
-        self.config.active_tab = self.tabset.saved_active()
+        self._store_tabs()
         self._save_config()
+
+    def _store_tabs(self):
+        self.config.tabs = self.tabset.saved_folders()
+        self.config.pinned_tabs = self.tabset.saved_pinned()
+        self.config.active_tab = self.tabset.saved_active()
 
     # ==========================================
     # 掃描（背景執行緒）
     # ==========================================
     def open_folder(self, path, force=False):
-        """在目前分頁開啟資料夾；已經掃過的直接顯示。"""
+        """在目前分頁開啟資料夾；掃過的先顯示上次的結果，再在背景重掃，有變動才更新畫面。"""
         if self.tab.folder != path:
             self.tab.folder = path
             self.tab.expanded.clear()
@@ -534,12 +699,24 @@ class FinderApp:
             self._refresh_tab_bar()
         if path in self.cache and not force:
             self.render()
+            self.refresh_quietly(path)
             return
-        depth = scan_depth_for(path)
-        self.set_status(f"掃描中…　{path}（深度 {depth}）", icon="⏳")
+        self.set_status(f"掃描中…　{path}（深度 {scan_depth_for(path)}）", icon="⏳")
         self._show_placeholder("掃描中…", icon="⏳")
+        self._start_scan(path)
+
+    def refresh_quietly(self, path, min_age=REFRESH_MIN_AGE):
+        """背景重掃已經顯示過的資料夾；剛掃過的不重掃。"""
+        if not path or path in self.scanning or path not in self.cache:
+            return
+        if time.monotonic() - self.scanned_at.get(path, 0) < min_age:
+            return
+        self._start_scan(path)
+
+    def _start_scan(self, path):
         if path in self.scanning:
             return
+        depth = scan_depth_for(path)
 
         def work():
             res = scan_folder(path, depth, cancelled=lambda: path not in self.wanted)
@@ -563,13 +740,39 @@ class FinderApp:
                 if path == self.current_folder:
                     self.open_folder(path)
                 continue
+            old = self.cache.get(path)
             self.cache[path] = res
-            if path == self.current_folder:
+            self.scanned_at[path] = time.monotonic()
+            if path != self.current_folder:
+                continue
+            if old is None:
                 self.render()
+            else:
+                note = _change_note(old, res)
+                if note:
+                    self.render(keep_view=True, note=note)
         if self.scanning:
             self.root.after(40, self._poll_results)
         else:
             self.polling = False
+
+    def _check_app_inactive(self):
+        try:
+            focused = self.root.focus_get()
+        except (KeyError, tk.TclError):  # 右鍵選單開著時 focus_get 會找不到選單內部的元件
+            focused = True
+        if focused is None:
+            self.app_active = False
+
+    def _on_focus_in(self, event):
+        if not self.app_active:
+            self.app_active = True
+            self.refresh_quietly(self.current_folder)
+
+    def _auto_refresh(self):
+        if self.root.state() != "iconic":
+            self.refresh_quietly(self.current_folder, min_age=AUTO_REFRESH_MS / 1000 - 1)
+        self.root.after(AUTO_REFRESH_MS, self._auto_refresh)
 
     def rescan(self):
         path = self.current_folder
@@ -587,17 +790,28 @@ class FinderApp:
             var = self.group_vars.get(g["name"])
             if var is None:
                 var = self.group_vars[g["name"]] = tk.BooleanVar(value=g["on"])
-            image = self.icons.get(g["icon"]) or self.icons.get("📁")
-            tk.Checkbutton(self.filter_frame, text=f" {g['name']}", image=image or "", compound="left",
-                           variable=var, command=lambda n=g["name"]: self._on_group_toggled(n),
-                           bg=C["bg_panel"], fg=C["fg_text"], selectcolor=C["bg_element"],
-                           activebackground=C["bg_panel"], activeforeground=C["fg_highlight"],
-                           font=(FONT, 9)).pack(side=tk.LEFT, padx=3)
+            self._checkbox(self.filter_frame, g["name"], var, lambda n=g["name"]: self._on_group_toggled(n),
+                           icon=g["icon"] if self.icons.get(g["icon"]) else "📁").pack(side=tk.LEFT, padx=3)
+        self._checkbox(self.filter_frame, OTHERS_NAME, self.others_var, self._on_others_toggled,
+                       icon=OTHERS_ICON).pack(side=tk.LEFT, padx=3)
 
     def _on_group_toggled(self, name):
         self.config.group_states[name] = self.group_vars[name].get()
         self._save_config()
         self.render()
+
+    def _on_others_toggled(self):
+        self.config.group_states[OTHERS_NAME] = self.others_var.get()
+        self._save_config()
+        self.render()
+
+    def _on_remember_toggled(self):
+        self.config.remember_session = self.remember_var.get()
+        self._save_config()
+        if self.config.remember_session:
+            self.set_status("下次開啟會還原現在開著的分頁和加入的副檔名", icon="🕘")
+        else:
+            self.set_status("下次開啟只會打開釘選的分頁，加入的副檔名不保留（這次開著的不受影響）", icon="📌")
 
     def add_extension(self):
         text = self.entry_ext.get()
@@ -648,7 +862,8 @@ class FinderApp:
     # ==========================================
     # 右側分欄
     # ==========================================
-    def render(self):
+    def render(self, keep_view=False, note=""):
+        """keep_view：背景重掃後更新時，各欄捲動的位置維持不動。note：附在狀態列最後的說明。"""
         res = self.cache.get(self.current_folder)
         if res is None:
             return
@@ -659,28 +874,31 @@ class FinderApp:
         since = self._since()
         by_group, others = classify(res.files, self.groups, names, query, since)
         filtering = bool(query) or since is not None
-        if filtering:
-            # 「其他」欄是否出現只看資料夾本身，避免打字時版面跳來跳去
-            has_others = bool(classify(res.files, self.groups, names)[1])
-        else:
-            has_others = bool(others)
+        has_others = self.others_var.get()
 
         keys = names + ([OTHERS_KEY] if has_others else [])
+        scroll = {}
         if keys != self.column_keys:
             self._build_columns(active, has_others)
             self.column_keys = keys
+        elif keep_view:
+            scroll = {key: col[2].yview()[0] for key, col in self.columns.items()}
 
         self.item_files.clear()
         self.more_items.clear()
         for g in active:
             self._fill_column(g["name"], by_group[g["name"]], g["icon"], PAGE_SIZE, filtering)
         if has_others:
-            self._fill_column(OTHERS_KEY, others, "📁", OTHERS_PAGE_SIZE, filtering)
+            self._fill_column(OTHERS_KEY, others, OTHERS_ICON, OTHERS_PAGE_SIZE, filtering)
+        for key, top in scroll.items():
+            self.columns[key][2].yview_moveto(top)
 
         status = f"{res.root}　｜　掃描深度 {res.depth}　｜　{len(res.files):,} 個檔案　｜　{res.elapsed:.2f} 秒"
         if filtering:
-            shown = sum(len(v) for v in by_group.values()) + len(others)
+            shown = sum(len(v) for v in by_group.values()) + (len(others) if has_others else 0)
             status += f"　｜　符合條件 {shown:,} 個"
+        if note:
+            status += f"　｜　{note}"
         if res.unreadable:
             status += f"　｜　{len(res.unreadable)} 個資料夾無法讀取（點這裡查看）"
         self.set_status(status, warn=bool(res.unreadable), icon="⚠" if res.unreadable else "📂")
@@ -877,7 +1095,6 @@ class FinderApp:
 
     def on_close(self):
         self.config.geometry = self.root.geometry()
-        self.config.tabs = self.tabset.saved_folders()
-        self.config.active_tab = self.tabset.saved_active()
+        self._store_tabs()
         self._save_config()
         self.root.destroy()

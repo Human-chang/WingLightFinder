@@ -141,6 +141,34 @@ class ConfigTest(unittest.TestCase):
         c.save()
         self.assertTrue(os.path.exists(os.path.join(self.dir, CONFIG_NAME)))
 
+    def test_pinned_tabs_roundtrip(self):
+        c = Config(base_dir=self.dir)
+        self.assertTrue(c.remember_session)
+        c.pinned_tabs = ["D:\\常用"]
+        c.tabs = ["E:\\南40線"]
+        c.save()
+        c2 = Config(base_dir=self.dir)
+        self.assertEqual(c2.pinned_tabs, ["D:\\常用"])
+        self.assertEqual(c2.tabs, ["E:\\南40線"])
+
+    def test_not_remembering_keeps_only_pinned_tabs(self):
+        c = Config(base_dir=self.dir)
+        c.add_extension(".ifc")
+        c.pinned_tabs = ["D:\\常用"]
+        c.tabs = ["E:\\南40線"]
+        c.active_tab = 1
+        c.favorites.append("D:\\計畫案")
+        c.remember_session = False
+        c.save()
+        self.assertEqual(len(c.custom_groups), 1)   # 這次開著的不受影響
+        c2 = Config(base_dir=self.dir)
+        self.assertFalse(c2.remember_session)
+        self.assertEqual(c2.pinned_tabs, ["D:\\常用"])
+        self.assertEqual(c2.tabs, [])
+        self.assertEqual(c2.active_tab, 0)
+        self.assertEqual(c2.custom_groups, [])
+        self.assertEqual(c2.favorites, ["D:\\計畫案"])  # 我的最愛一律保留
+
     def test_broken_config_falls_back_to_defaults(self):
         with open(os.path.join(self.dir, CONFIG_NAME), "w", encoding="utf-8") as f:
             f.write("{ 壞掉的 json")
@@ -199,6 +227,70 @@ class TabListTest(unittest.TestCase):
 
     def test_title_of_drive_root(self):
         self.assertEqual(TabList(["D:\\"]).current.title, "D:\\")
+
+    def folders(self, tabs):
+        return [t.folder for t in tabs.tabs]
+
+    def test_pinned_come_first(self):
+        tabs = TabList(["D:\\A"], active=1, pinned=["D:\\P"])
+        self.assertEqual(self.folders(tabs), ["D:\\P", "D:\\A"])
+        self.assertTrue(tabs.tabs[0].pinned)
+        self.assertEqual(tabs.current.folder, "D:\\A")
+        self.assertEqual(tabs.saved_pinned(), ["D:\\P"])
+        self.assertEqual(tabs.saved_folders(), ["D:\\A"])
+        self.assertEqual(tabs.saved_active(), 1)
+
+    def test_only_pinned_when_not_remembering(self):
+        tabs = TabList([], active=0, pinned=["D:\\P", "D:\\Q"])
+        self.assertEqual(self.folders(tabs), ["D:\\P", "D:\\Q"])
+        self.assertEqual(tabs.current.folder, "D:\\P")
+
+    def test_pinned_cannot_close(self):
+        tabs = TabList(["D:\\A"], pinned=["D:\\P"])
+        self.assertFalse(tabs.close(0))
+        self.assertEqual(self.folders(tabs), ["D:\\P", "D:\\A"])
+
+    def test_add_never_goes_into_pinned_area(self):
+        tabs = TabList(["D:\\A"], active=0, pinned=["D:\\P", "D:\\Q"])
+        index = tabs.add("D:\\B")
+        self.assertEqual(index, 2)
+        self.assertEqual(self.folders(tabs), ["D:\\P", "D:\\Q", "D:\\B", "D:\\A"])
+
+    def test_move(self):
+        tabs = TabList(["D:\\A", "D:\\B", "D:\\C"], active=0)
+        self.assertEqual(tabs.move(0, 3), 2)       # 拖到最右邊
+        self.assertEqual(self.folders(tabs), ["D:\\B", "D:\\C", "D:\\A"])
+        self.assertEqual(tabs.current.folder, "D:\\A")  # 目前分頁跟著移動
+        tabs.move(1, 0)
+        self.assertEqual(self.folders(tabs), ["D:\\C", "D:\\B", "D:\\A"])
+        tabs.move(1, 1)                            # 放回原位
+        tabs.move(1, 2)
+        self.assertEqual(self.folders(tabs), ["D:\\C", "D:\\B", "D:\\A"])
+
+    def test_move_stays_in_own_area(self):
+        tabs = TabList(["D:\\A", "D:\\B"], pinned=["D:\\P", "D:\\Q"])
+        tabs.move(3, 0)                            # 一般分頁拖到最左邊 → 停在釘選區右邊
+        self.assertEqual(self.folders(tabs), ["D:\\P", "D:\\Q", "D:\\B", "D:\\A"])
+        tabs.move(0, 4)                            # 釘選分頁拖到最右邊 → 停在釘選區最右邊
+        self.assertEqual(self.folders(tabs), ["D:\\Q", "D:\\P", "D:\\B", "D:\\A"])
+
+    def test_pin_and_unpin_move_to_the_boundary(self):
+        tabs = TabList(["D:\\A", "D:\\B", "D:\\C"], active=1, pinned=["D:\\P"])
+        self.assertTrue(tabs.set_pinned(3, True))
+        self.assertEqual(self.folders(tabs), ["D:\\P", "D:\\C", "D:\\A", "D:\\B"])
+        self.assertEqual(tabs.current.folder, "D:\\A")
+        self.assertTrue(tabs.set_pinned(0, False))
+        self.assertEqual(self.folders(tabs), ["D:\\C", "D:\\P", "D:\\A", "D:\\B"])
+        self.assertEqual(tabs.saved_pinned(), ["D:\\C"])
+
+    def test_blank_tab_cannot_be_pinned(self):
+        tabs = TabList()
+        self.assertFalse(tabs.set_pinned(0, True))
+
+    def test_same_folder_twice_are_different_tabs(self):
+        tabs = TabList(["D:\\A", "D:\\A"], active=1)
+        tabs.move(1, 0)
+        self.assertEqual(tabs.active, 0)
 
 
 class DemoProjectTest(unittest.TestCase):
