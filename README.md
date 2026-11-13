@@ -36,7 +36,7 @@ WingLightFinder 把一個專案資料夾往下掃 2~3 層，**依軟體類型分
 | 📅 時間快篩 | 今天／7 天／30 天／今年 |
 | ⚡ 背景掃描 | 掃描不會卡住視窗；切換分類、搜尋都不必重讀硬碟，掃過的資料夾先顯示上次的結果再在背景更新（F5 從頭重新掃描） |
 | 🧭 看得出在哪個子資料夾 | 滑鼠停在檔名上會顯示「子資料夾\檔名」，點一下在下方顯示大小和修改時間 |
-| 📋 右鍵選單 | 開啟、開啟檔案位置、複製完整路徑、複製檔名；PDF 可直接[用 WingLightPDF 開啟](https://github.com/Human-chang/WingLightPDF) |
+| 📋 右鍵選單 | 開啟、開啟檔案位置、複製檔案（Ctrl+C，可以直接貼到檔案總管或 LINE）、複製完整路徑、複製檔名；PDF 可直接[用 WingLightPDF 開啟](https://github.com/Human-chang/WingLightPDF) |
 | ⭐ 我的最愛 | 常用專案資料夾一鍵切換；網路磁碟也可以。在左邊資料夾上按右鍵就能加入或移除 |
 | 🧹 自動略過雜檔 | Office 開啟中的 `~$` 鎖定檔、AutoCAD 的 `.dwl`、Shapefile 和影像的附屬檔不會塞滿「其他」欄 |
 
@@ -84,7 +84,7 @@ python main.py --self-test     # 自我測試（不顯示視窗）
 - Browser-style tabs to switch between project folders (Ctrl+T / Ctrl+W / Ctrl+Tab); each tab keeps its own search and time filter, and tabs are restored on next launch
 - Multi-keyword search across sub-folder and file names, time filters (today / 7 days / 30 days / this year)
 - Background scanning with per-folder cache; toggling columns or searching never re-reads the disk
-- Hover to see the sub-folder, right-click to copy paths or open the file location
+- Hover to see the sub-folder, right-click (or Ctrl+C) to copy the file itself, copy paths or open the file location
 - Favorites (network drives included), custom extensions, settings stored next to the app
 - Pure Python standard library (tkinter); released builds are produced by GitHub Actions from this source
 

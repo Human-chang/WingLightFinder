@@ -15,6 +15,7 @@ import tkinter.font as tkfont
 from tkinter import filedialog, ttk, messagebox
 from datetime import datetime, timedelta
 
+from core.clipboard import copy_file_to_clipboard
 from core.config import Config, app_dir
 from core.scanner import scan_folder, scan_depth_for, classify
 from core.tabs import TabList
@@ -936,6 +937,9 @@ class FinderApp:
             tree.bind("<ButtonRelease-1>", self._on_file_click)
             tree.bind("<<TreeviewSelect>>", self._on_file_select)
             tree.bind("<Button-3>", self._on_right_click)
+            # 只綁在檔案清單上：焦點在搜尋框時，Ctrl+C 照常複製文字
+            tree.bind("<Control-c>", self._on_file_copy)
+            tree.bind("<Control-C>", self._on_file_copy)
             tree.bind("<Motion>", self._on_motion)
             tree.bind("<Leave>", lambda e: self.tip.hide())
             self.columns[key] = (frame, title_label, tree, title)
@@ -1021,14 +1025,16 @@ class FinderApp:
                        activebackground=C["accent"], activeforeground=C["fg_highlight"], borderwidth=0,
                        font=(FONT, 9))
 
-        def item(label, icon, command):
-            menu.add_command(label=f" {label}", image=self.icons.get(icon) or "", compound="left", command=command)
+        def item(label, icon, command, accelerator=""):
+            menu.add_command(label=f" {label}", image=self.icons.get(icon) or "", compound="left", command=command,
+                             accelerator=accelerator)
 
         item("開啟", "▶", lambda: self.open_file(f.path))
         if f.ext == ".pdf" and self.wlpdf:
             item("用 WingLightPDF 開啟", "⚡", lambda: self.open_with_winglightpdf(f.path))
         item("開啟檔案位置", "📂", lambda: self.open_location(f.path))
         menu.add_separator()
+        item("複製檔案", "📋", lambda: self.copy_file(f.path), accelerator="Ctrl+C")
         item("複製完整路徑", "📋", lambda: self.copy_text(f.path, "完整路徑"))
         item("複製檔名", "📋", lambda: self.copy_text(f.name, "檔名"))
         menu.add_separator()
@@ -1055,6 +1061,24 @@ class FinderApp:
             subprocess.Popen(f'explorer /select,"{path}"')
         else:
             messagebox.showwarning("找不到檔案", f"{path}\n\n檔案可能已經被移動或刪除，可以按 F5 重新掃描。")
+
+    def _on_file_copy(self, event):
+        sel = event.widget.selection()
+        f = self.item_files.get(sel[0]) if sel else None
+        if f:
+            self.copy_file(f.path)
+        return "break"
+
+    def copy_file(self, path):
+        if not os.path.exists(path):
+            messagebox.showwarning("找不到檔案", f"{path}\n\n檔案可能已經被移動或刪除，可以按 F5 重新掃描。")
+            return
+        try:
+            copy_file_to_clipboard(path)
+        except OSError as e:
+            messagebox.showerror("無法複製檔案", f"{e}\n\n請稍後再試一次，或改用「複製完整路徑」。")
+            return
+        self.set_status(f"已複製檔案：{os.path.basename(path)}", icon="📋")
 
     def copy_text(self, text, what):
         self.root.clipboard_clear()
