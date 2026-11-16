@@ -128,10 +128,23 @@ def run_self_test(result_path=None) -> int:
                     pass
                 app.refresh_quietly(project, min_age=0)
                 wait(lambda: any(f.name == "新增的平面圖.pdf" for f in app.item_files.values()))
-                status = app.status.cget("text")
+                status = app.status.text()
                 check("背景重掃後出現新增的檔案",
                       any(f.name == "新增的平面圖.pdf" for f in app.item_files.values()), status)
                 check("狀態列說明自動更新了什麼", "已自動更新：新增 1 個" in status, status)
+
+                # 深淺色主題：即時切換，記在設定檔（暫存資料夾裡的，不碰使用者的設定）
+                from tkinter import ttk
+                from ui.winglight_tk import T
+                first = app.theme.name
+                app.toggle_theme()
+                second = app.theme.name
+                dark = second == "dark"
+                colors = (root.cget("bg"), app.status.cget("bg"), ttk.Style(root).lookup("Treeview", "background"))
+                check("切換深淺色主題，畫面跟著換色",
+                      second != first and colors == (T["bg"][dark], T["chrome"][dark], T["panel"][dark]),
+                      (first, second, colors))
+                check("主題記在設定檔", Config(base_dir=tmp).theme == second, Config(base_dir=tmp).theme)
 
                 # 釘選：存進設定檔、不能關、從左邊開資料夾會開在新分頁
                 app.set_tab_pinned(0, True)
@@ -159,6 +172,7 @@ def run_self_test(result_path=None) -> int:
                     names = [g["name"] for g in app2.groups]
                     check("不記住上次畫面時只打開釘選的分頁", folders == [project], folders)
                     check("不記住上次畫面時不保留加入的副檔名", ".IFC 檔" not in names, names)
+                    check("下次開啟沿用選過的主題", app2.theme.name == second, app2.theme.name)
                 finally:
                     root2.destroy()
             finally:

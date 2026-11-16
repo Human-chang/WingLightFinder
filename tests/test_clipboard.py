@@ -104,7 +104,7 @@ class CopyFileUiTest(unittest.TestCase):
         f = self.app.item_files[iid]
         self.assertEqual(result, "break")
         self.assertEqual(self.copied, [f.path])
-        self.assertEqual(self.app.status.cget("text").strip(), f"已複製檔案：{f.name}")
+        self.assertEqual(self.app.status.text().strip(), f"已複製檔案：{f.name}")
 
     def test_ctrl_c_on_year_row_does_nothing(self):
         tree, _ = self._file_tree()

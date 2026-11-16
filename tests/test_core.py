@@ -169,6 +169,19 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(c2.custom_groups, [])
         self.assertEqual(c2.favorites, ["D:\\計畫案"])  # 我的最愛一律保留
 
+    def test_theme_roundtrip(self):
+        c = Config(base_dir=self.dir)
+        self.assertIsNone(c.theme)                 # 還沒選過：跟著 Windows
+        c.save()
+        with open(os.path.join(self.dir, CONFIG_NAME), encoding="utf-8") as f:
+            self.assertNotIn("theme", json.load(f))
+        c.theme = "dark"
+        c.save()
+        self.assertEqual(Config(base_dir=self.dir).theme, "dark")
+        with open(os.path.join(self.dir, CONFIG_NAME), "w", encoding="utf-8") as f:
+            json.dump({"theme": "紫色"}, f, ensure_ascii=False)
+        self.assertIsNone(Config(base_dir=self.dir).theme)
+
     def test_broken_config_falls_back_to_defaults(self):
         with open(os.path.join(self.dir, CONFIG_NAME), "w", encoding="utf-8") as f:
             f.write("{ 壞掉的 json")

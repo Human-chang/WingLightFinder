@@ -8,6 +8,7 @@ import json
 APP_NAME = "WingLightFinder"
 CONFIG_NAME = "WingLightFinder.json"
 LEGACY_CONFIG_NAME = "explorer_config.json"  # 舊版「專案檔案速查儀表板」的設定檔
+THEMES = ("light", "dark")
 
 DEFAULT_GROUPS = [
     {"name": "PDF 報告", "icon": "📄", "exts": [".pdf"], "default_on": True},
@@ -47,6 +48,7 @@ class Config:
         self.pinned_tabs = []     # 釘選的分頁：每次開啟都會打開
         self.active_tab = 0       # 在「釘選＋一般分頁」裡的位置
         self.remember_session = True  # 關掉時，下次開啟只打開釘選的分頁，也不保留加入的副檔名
+        self.theme = None             # "light"／"dark"；None 代表還沒選過，跟著 Windows
         self.load()
 
     def load(self):
@@ -65,6 +67,7 @@ class Config:
         active = data.get("active_tab", 0)
         self.active_tab = active if isinstance(active, int) else 0
         self.remember_session = data.get("remember_session", True) is not False
+        self.theme = data.get("theme") if data.get("theme") in THEMES else None
 
     @staticmethod
     def _read(path):
@@ -87,6 +90,8 @@ class Config:
             "active_tab": self.active_tab if remember else 0,
             "remember_session": remember,
         }
+        if self.theme in THEMES:
+            data["theme"] = self.theme
         try:
             self._write(self.path, data)
         except OSError:

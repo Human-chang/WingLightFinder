@@ -43,8 +43,11 @@ https://github.com/Human-chang/WingLightFinder
 - 磁碟根目錄只列根目錄的檔案；第二層的資料夾往下 2 層；更深的往下 3 層。
 - 讀不到的資料夾會在下方狀態列提醒，點一下可以看清單。
 
+【深淺色】
+- 第一次開啟跟著 Windows 的深淺色設定。按左下角的「淺色／深色」可以切換，選了之後會記住。
+
 【設定檔】
-- 我的最愛、釘選的分頁、分類勾選、視窗大小存在本資料夾的 WingLightFinder.json。
+- 我的最愛、釘選的分頁、分類勾選、視窗大小、深淺色存在本資料夾的 WingLightFinder.json。
 - 舊版「專案檔案速查儀表板」的 explorer_config.json 放進本資料夾，第一次開啟會自動匯入我的最愛。
 - 程式放在不能寫入的位置時，設定改存到 %APPDATA%\WingLightFinder\。
 

@@ -38,6 +38,7 @@ WingLightFinder 把一個專案資料夾往下掃 2~3 層，**依軟體類型分
 | 🧭 看得出在哪個子資料夾 | 滑鼠停在檔名上會顯示「子資料夾\檔名」，點一下在下方顯示大小和修改時間 |
 | 📋 右鍵選單 | 開啟、開啟檔案位置、複製檔案（Ctrl+C，可以直接貼到檔案總管或 LINE）、複製完整路徑、複製檔名；PDF 可直接[用 WingLightPDF 開啟](https://github.com/Human-chang/WingLightPDF) |
 | ⭐ 我的最愛 | 常用專案資料夾一鍵切換；網路磁碟也可以。在左邊資料夾上按右鍵就能加入或移除 |
+| 🌗 淺色、深色主題 | 第一次開啟跟著 Windows 的設定，左下角可以切換，選了之後會記住 |
 | 🧹 自動略過雜檔 | Office 開啟中的 `~$` 鎖定檔、AutoCAD 的 `.dwl`、Shapefile 和影像的附屬檔不會塞滿「其他」欄 |
 
 ### 掃描深度
@@ -56,7 +57,7 @@ WingLightFinder 把一個專案資料夾往下掃 2~3 層，**依軟體類型分
 2. 雙擊 **`WingLightFinder.exe`**。不需要安裝，也不需要系統管理員權限。
 3. 第一次開啟時，Windows 可能跳出「Windows 已保護您的電腦」：這是因為程式沒有付費的數位簽章，按「**其他資訊 → 仍要執行**」即可。執行檔是 GitHub Actions 從公開原始碼自動打包的，打包紀錄都在 [Actions](../../actions) 頁面。
 
-設定（我的最愛、釘選的分頁、勾選的分類、視窗大小）存在程式旁邊的 `WingLightFinder.json`，整個資料夾搬到別台電腦設定也會跟著走。
+設定（我的最愛、釘選的分頁、勾選的分類、視窗大小、深淺色）存在程式旁邊的 `WingLightFinder.json`，整個資料夾搬到別台電腦設定也會跟著走。
 
 > 用過舊版「專案檔案速查儀表板」的話，把舊的 `explorer_config.json` 放進同一個資料夾，第一次開啟會自動匯入我的最愛。
 
@@ -86,6 +87,7 @@ python main.py --self-test     # 自我測試（不顯示視窗）
 - Background scanning with per-folder cache; toggling columns or searching never re-reads the disk
 - Hover to see the sub-folder, right-click (or Ctrl+C) to copy the file itself, copy paths or open the file location
 - Favorites (network drives included), custom extensions, settings stored next to the app
+- Light and dark themes; follows Windows on first launch
 - Pure Python standard library (tkinter); released builds are produced by GitHub Actions from this source
 
 Download the zip from **[Releases](../../releases)**, extract it anywhere and run `WingLightFinder.exe`.

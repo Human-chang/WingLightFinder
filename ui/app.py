@@ -11,7 +11,6 @@ import winreg
 import threading
 import subprocess
 import tkinter as tk
-import tkinter.font as tkfont
 from tkinter import filedialog, ttk, messagebox
 from datetime import datetime, timedelta
 
@@ -20,9 +19,10 @@ from core.config import Config, app_dir
 from core.scanner import scan_folder, scan_depth_for, classify
 from core.tabs import TabList
 from ui.icons import Icons
+from ui.winglight_tk import (FONTS, THEME_NAMES, Theme, Segmented, StatusBar, Tooltip, box, checkbox, entry_box,
+                             popup_menu, separator, system_theme, tool_button)
 
 APP_TITLE = "WingLightFinder — 專案檔案速查"
-FONT = "Microsoft JhengHei"
 PAGE_SIZE = 100          # 每欄先列出的筆數，其餘按「顯示全部」再展開
 OTHERS_PAGE_SIZE = 25
 OTHERS_KEY = "__others__"
@@ -30,23 +30,7 @@ OTHERS_NAME = "其他"       # 不在任何分類裡的檔案；預設不顯示�
 OTHERS_ICON = "📎"
 REFRESH_MIN_AGE = 3        # 秒：剛掃過的資料夾不重掃
 AUTO_REFRESH_MS = 30_000   # 視窗開著時，每 30 秒在背景重掃目前的資料夾
-
-C = {
-    "bg_main": "#1e1e1e",
-    "bg_panel": "#252526",
-    "bg_element": "#333333",
-    "bg_hover": "#2a2d2e",
-    "fg_text": "#cccccc",
-    "fg_dim": "#808080",
-    "fg_highlight": "#ffffff",
-    "accent": "#0e639c",
-    "accent_hover": "#1177bb",
-    "info": "#56b6c2",
-    "warn": "#e5c07b",
-    "link": "#4fc1ff",
-    "year_bg": "#2c313a",
-    "year_fg": "#e5c07b",
-}
+SEP = "｜"
 
 TIME_FILTERS = [("全部", None), ("今天", "today"), ("7 天", 7), ("30 天", 30), ("今年", "year")]
 
@@ -85,40 +69,6 @@ def _change_note(old, new):
     return "已自動更新" + ("：" + "、".join(parts) if parts else "")
 
 
-class HoverTip:
-    """滑鼠停在檔案上時，顯示被截掉的完整檔名與子資料夾。"""
-
-    def __init__(self, root):
-        self.root = root
-        self.win = None
-        self.after_id = None
-        self.key = None
-
-    def schedule(self, key, text, x, y):
-        if key == self.key:
-            return
-        self.hide()
-        self.key = key
-        self.after_id = self.root.after(450, lambda: self._show(text, x, y))
-
-    def _show(self, text, x, y):
-        self.after_id = None
-        self.win = tk.Toplevel(self.root)
-        self.win.wm_overrideredirect(True)
-        self.win.wm_geometry(f"+{x + 16}+{y + 14}")
-        tk.Label(self.win, text=text, bg="#3c3c3c", fg=C["fg_highlight"], font=(FONT, 9),
-                 padx=8, pady=4, justify=tk.LEFT, relief=tk.SOLID, borderwidth=1).pack()
-
-    def hide(self):
-        if self.after_id:
-            self.root.after_cancel(self.after_id)
-            self.after_id = None
-        if self.win:
-            self.win.destroy()
-            self.win = None
-        self.key = None
-
-
 class FinderApp:
     def __init__(self, root, config=None):
         self.root = root
@@ -151,10 +101,12 @@ class FinderApp:
 
         self.scale = max(1.0, root.winfo_fpixels("1i") / 96)
         self.icons = Icons(root, self.scale)
+        self.theme = Theme(root, self.config.theme or system_theme(), self.scale, self.icons.size)
+        self.theme.on_change(self._on_theme_changed)
+        self.px = self.theme.px
         root.title(APP_TITLE)
         root.geometry(self.config.geometry or f"{int(1280 * self.scale)}x{int(780 * self.scale)}")
         root.minsize(int(900 * self.scale), int(560 * self.scale))
-        root.configure(bg=C["bg_main"])
         # 打包後圖示在 _internal/assets（sys._MEIPASS），從原始碼執行時在專案的 assets
         icon = os.path.join(getattr(sys, "_MEIPASS", app_dir()), "assets", "app_icon.ico")
         if os.path.exists(icon):
@@ -163,10 +115,11 @@ class FinderApp:
             except tk.TclError:
                 pass
 
-        self.tip = HoverTip(root)
+        self.tip = Tooltip(root, self.theme)
+        self.hover = None           # 滑鼠移過的清單列 (Treeview, item id)
         self.others_var = tk.BooleanVar(value=self.config.group_states.get(OTHERS_NAME, False))
         self.remember_var = tk.BooleanVar(value=remember)
-        self._setup_styles()
+        self.search_var = tk.StringVar()
         self._build_ui()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-f>", lambda e: self._focus_search())
@@ -175,6 +128,9 @@ class FinderApp:
         root.bind_all("<Control-w>", lambda e: (self.close_tab(self.tabset.active), "break")[1])
         root.bind_all("<Control-Tab>", lambda e: (self._step_tab(1), "break")[1])
         root.bind_all("<Control-Shift-Tab>", lambda e: (self._step_tab(-1), "break")[1])
+        # 滑鼠提示在按下按鍵或捲動時立刻收起來
+        root.bind_all("<KeyPress>", self.tip.hide, add="+")
+        root.bind_all("<MouseWheel>", self.tip.hide, add="+")
         # Windows 上的 Tk 不會送 <Activate>，用焦點進出判斷使用者是不是切到別的程式又切回來
         root.bind("<FocusOut>", lambda e: root.after_idle(self._check_app_inactive))
         root.bind("<FocusIn>", self._on_focus_in)
@@ -191,133 +147,111 @@ class FinderApp:
         return self.tab.folder
 
     # ==========================================
-    # 樣式與版面
+    # 版面
     # ==========================================
-    def _setup_styles(self):
-        line = tkfont.Font(family=FONT, size=9).metrics("linespace")
-        rowheight = max(line, self.icons.size) + int(8 * self.scale)
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Treeview", background=C["bg_main"], foreground=C["fg_text"], fieldbackground=C["bg_main"],
-                        rowheight=rowheight, borderwidth=0, font=(FONT, 9))
-        style.map("Treeview", background=[("selected", C["accent"])])
-        style.configure("Treeview.Heading", background=C["bg_panel"], foreground=C["fg_highlight"], relief="flat",
-                        font=(FONT, 9, "bold"))
-        style.map("Treeview.Heading", background=[("active", C["bg_element"])])
-        # 檔案清單沒有階層，拿掉展開箭頭佔的空間
-        style.configure("Files.Treeview", indent=0)
-        style.layout("Files.Treeview.Item", [
-            ("Treeitem.padding", {"sticky": "nswe", "children": [
-                ("Treeitem.image", {"side": "left", "sticky": ""}),
-                ("Treeitem.focus", {"side": "left", "sticky": "", "children": [
-                    ("Treeitem.text", {"side": "left", "sticky": ""}),
-                ]}),
-            ]}),
-        ])
-        style.configure("Vertical.TScrollbar", background=C["bg_element"], troughcolor=C["bg_main"],
-                        bordercolor=C["bg_main"], arrowcolor=C["fg_text"])
-        style.configure("TSeparator", background=C["bg_element"])
+    def _tool_button(self, parent, text, command, icon=None, **kw):
+        return tool_button(parent, self.theme, text, command, self.icons.get(icon), **kw)
 
-    def _button(self, parent, text, command, accent=False, icon=None):
-        bg = C["accent"] if accent else C["bg_element"]
-        fg = C["fg_highlight"] if accent else C["fg_text"]
-        image = self.icons.get(icon)
-        return tk.Button(parent, text=f" {text}" if image else text, image=image or "", compound="left",
-                         command=command, bg=bg, fg=fg, activebackground=C["bg_hover"],
-                         activeforeground=C["fg_highlight"], relief=tk.FLAT, borderwidth=0, padx=8, pady=4,
-                         cursor="hand2", font=(FONT, 9))
+    def _caption(self, parent, text, bg="chrome"):
+        """「修改時間」「顯示分類」這類欄位名稱：caption、muted。"""
+        return self.theme.paint(tk.Label(parent, text=text, font=FONTS["caption"], borderwidth=0), bg=bg, fg="muted")
 
-    def _label(self, parent, text, icon=None, **kw):
-        image = self.icons.get(icon)
-        return tk.Label(parent, text=f" {text}" if image else text, image=image or "", compound="left",
-                        bg=C["bg_panel"], fg=C["fg_text"], font=(FONT, 9), **kw)
-
-    def _entry(self, parent, **kw):
-        return tk.Entry(parent, bg=C["bg_main"], fg=C["fg_highlight"], insertbackground=C["fg_highlight"],
-                        relief=tk.FLAT, font=(FONT, 10), **kw)
-
-    def _checkbox(self, parent, text, variable, command, icon=None):
-        image = self.icons.get(icon)
-        return tk.Checkbutton(parent, text=f" {text}" if image else text, image=image or "", compound="left",
-                              variable=variable, command=command,
-                              bg=C["bg_panel"], fg=C["fg_text"], selectcolor=C["bg_element"],
-                              activebackground=C["bg_panel"], activeforeground=C["fg_highlight"],
-                              font=(FONT, 9))
+    def _style_tree(self, tree):
+        """清單的 tag 顏色。hover 要最先建立：先建立的 tag 優先權比較高。"""
+        t = self.theme
+        tree.tag_configure("hover", background=t["hover"])
+        tree.tag_configure("year", background=t["bg"], foreground=t["warn"], font=FONTS["body-strong"])
+        tree.tag_configure("more", foreground=t["accent"], font=FONTS["body-strong"])
+        tree.tag_configure("empty", foreground=t["muted"])
 
     def _build_ui(self):
-        top = tk.Frame(self.root, bg=C["bg_panel"], padx=10, pady=8)
+        t, px = self.theme, self.px
+        # Toolbar：chrome 底、下緣 1px line，兩列
+        top = t.paint(tk.Frame(self.root, padx=px(8), pady=px(6)), bg="chrome")
         top.pack(side=tk.TOP, fill=tk.X)
+        t.paint(tk.Frame(self.root, height=1), bg="line").pack(side=tk.TOP, fill=tk.X)
 
-        # 第一列：資料夾、搜尋、時間
-        row1 = tk.Frame(top, bg=C["bg_panel"])
+        # 第一列：資料夾、時間；搜尋框靠右
+        row1 = t.paint(tk.Frame(top), bg="chrome")
         row1.pack(fill=tk.X)
-        self._button(row1, "瀏覽目錄", self.select_directory, accent=True, icon="📁").pack(side=tk.LEFT, padx=2)
-        self._button(row1, "加入最愛", self.add_favorite, icon="⭐").pack(side=tk.LEFT, padx=2)
-        self._button(row1, "移除最愛", self.remove_favorite, icon="❌").pack(side=tk.LEFT, padx=2)
-        self._button(row1, "重新掃描", self.rescan, icon="🔄").pack(side=tk.LEFT, padx=2)
-        ttk.Separator(row1, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=12)
+        for text, command, icon in (("瀏覽目錄", self.select_directory, "📁"), ("加入最愛", self.add_favorite, "⭐"),
+                                    ("移除最愛", self.remove_favorite, "❌"), ("重新掃描", self.rescan, "🔄")):
+            self._tool_button(row1, text, command, icon=icon).pack(side=tk.LEFT, padx=(0, px(2)))
+        separator(row1, t).pack(side=tk.LEFT)
+        self._caption(row1, "修改時間").pack(side=tk.LEFT, padx=(px(4), px(8)))
+        self.time_filter = Segmented(row1, t, TIME_FILTERS, self.set_time_filter, self.tab.time_filter)
+        self.time_filter.pack(side=tk.LEFT)
 
-        self._label(row1, "搜尋", icon="🔍").pack(side=tk.LEFT)
-        self.search_var = tk.StringVar()
+        search_box, self.search_entry = entry_box(row1, t, 28, image=self.icons.get("🔍"))
+        search_box.pack(side=tk.RIGHT)
+        self.search_entry.configure(textvariable=self.search_var)
         self.search_var.trace_add("write", self._on_search_changed)
-        self.search_entry = self._entry(row1, textvariable=self.search_var, width=26)
-        self.search_entry.pack(side=tk.LEFT, ipady=4, padx=(6, 2))
         self.search_entry.bind("<Escape>", lambda e: self.search_var.set(""))
-        self._button(row1, "✕", lambda: self.search_var.set("")).pack(side=tk.LEFT)
-        ttk.Separator(row1, orient="vertical").pack(side=tk.LEFT, fill=tk.Y, padx=12)
-
-        self._label(row1, "修改時間", icon="🕒").pack(side=tk.LEFT, padx=(0, 6))
-        self.time_buttons = {}
-        for label, value in TIME_FILTERS:
-            btn = self._button(row1, label, lambda v=value: self.set_time_filter(v))
-            btn.pack(side=tk.LEFT, padx=1)
-            self.time_buttons[value] = btn
-        self._refresh_time_buttons()
-
-        remember = self._checkbox(row1, "記住上次畫面", self.remember_var, self._on_remember_toggled)
-        remember.pack(side=tk.RIGHT, padx=3)
-        tip = "勾選：下次開啟還原這次開著的分頁和加入的副檔名\n不勾：下次開啟只打開釘選的分頁"
-        remember.bind("<Enter>", lambda e: self.tip.schedule("remember", tip, e.x_root, e.y_root))
-        remember.bind("<Leave>", lambda e: self.tip.hide())
+        clear = t.paint(tk.Label(search_box, text="✕", font=FONTS["caption"], cursor="hand2", borderwidth=0,
+                                 padx=px(8)), bg="panel", fg="muted")
+        clear.pack(side=tk.RIGHT, fill=tk.Y)
+        clear.bind("<Button-1>", lambda e: self.search_var.set(""))
+        clear.bind("<Enter>", lambda e: clear.configure(fg=t["text"]))
+        clear.bind("<Leave>", lambda e: t.repaint(clear))
+        self.tip.attach(clear, "清除搜尋（Esc）")
+        self._caption(row1, "搜尋").pack(side=tk.RIGHT, padx=(0, px(8)))
 
         # 第二列：分類
-        row2 = tk.Frame(top, bg=C["bg_panel"])
-        row2.pack(fill=tk.X, pady=(8, 0))
-        self._label(row2, "顯示分類").pack(side=tk.LEFT, padx=(2, 6))
-        self.filter_frame = tk.Frame(row2, bg=C["bg_panel"])
+        row2 = t.paint(tk.Frame(top), bg="chrome")
+        row2.pack(fill=tk.X, pady=(px(4), 0))
+        self._caption(row2, "顯示分類").pack(side=tk.LEFT, padx=(px(10), px(6)))
+        self.filter_frame = t.paint(tk.Frame(row2), bg="chrome")
         self.filter_frame.pack(side=tk.LEFT)
         self._refresh_filters()
-        self.entry_ext = self._entry(row2, width=8)
-        self.entry_ext.pack(side=tk.LEFT, padx=(12, 4), ipady=3)
+        separator(row2, t).pack(side=tk.LEFT)
+        ext_box, self.entry_ext = entry_box(row2, t, 8)
+        ext_box.pack(side=tk.LEFT, padx=(0, px(2)))
         self.entry_ext.bind("<Return>", lambda e: self.add_extension())
-        self._button(row2, "+ 加入其他副檔名", self.add_extension).pack(side=tk.LEFT)
+        self._tool_button(row2, "+ 加入其他副檔名", self.add_extension).pack(side=tk.LEFT)
+
+        remember = checkbox(row2, t, "記住上次畫面", self.remember_var, self._on_remember_toggled)
+        remember.pack(side=tk.RIGHT)
+        self.tip.attach(remember, "勾選：下次開啟還原這次開著的分頁和加入的副檔名\n不勾：下次開啟只打開釘選的分頁")
 
         # 狀態列（先 pack 才不會被主畫面擠掉）
-        self.status = tk.Label(self.root, text="", anchor="w", compound="left", bg=C["bg_panel"], fg=C["info"],
-                               font=(FONT, 9), padx=10, pady=4)
+        self.status = StatusBar(self.root, t)
         self.status.pack(side=tk.BOTTOM, fill=tk.X)
-        self.status.bind("<Button-1>", lambda e: self._show_unreadable())
+        self.status.bind_click(self._show_unreadable)
 
         paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        paned.pack(fill=tk.BOTH, expand=True, padx=px(8), pady=px(8))
 
-        left = tk.Frame(paned, bg=C["bg_main"])
+        # 左邊：資料夾樹，下方放深淺色切換
+        left = t.paint(tk.Frame(paned), bg="bg")
         paned.add(left, weight=1)
-        scroll = ttk.Scrollbar(left, orient="vertical")
-        self.tree = ttk.Treeview(left, yscrollcommand=scroll.set)
+        bottom = t.paint(tk.Frame(left), bg="bg")
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(px(6), 0))
+        self.theme_button = self._tool_button(bottom, "", self.toggle_theme, bg="bg", fg="muted")
+        self.theme_button.pack(side=tk.LEFT)
+        self.tip.attach(self.theme_button, "切換淺色／深色（會記住）")
+        self._refresh_theme_button()
+
+        tree_box = box(left, t)
+        tree_box.pack(fill=tk.BOTH, expand=True)
+        scroll = ttk.Scrollbar(tree_box, orient="vertical")
+        self.tree = ttk.Treeview(tree_box, yscrollcommand=scroll.set)
         scroll.config(command=self.tree.yview)
         scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.tree.heading("#0", text="專案與磁碟目錄", anchor="w")
+        self._style_tree(self.tree)
         self.tree.bind("<<TreeviewOpen>>", self._on_tree_open)
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
         self.tree.bind("<Button-2>", self._on_tree_middle_click)
         self.tree.bind("<Button-3>", self._on_tree_right_click)
+        self.tree.bind("<Motion>", lambda e: self._set_hover(self.tree, self.tree.identify_row(e.y)))
+        self.tree.bind("<Leave>", lambda e: self._set_hover(None, None))
 
-        self.right = tk.Frame(paned, bg=C["bg_main"])
+        # 右邊：分頁軌道（chrome 底），下面是分欄
+        self.right = t.paint(tk.Frame(paned), bg="bg")
         paned.add(self.right, weight=4)
-        self.tabbar = tk.Frame(self.right, bg=C["bg_main"])
-        self.tabbar.pack(side=tk.TOP, fill=tk.X, padx=4, pady=(0, 2))
+        self.tabbar = t.paint(tk.Frame(self.right, padx=px(4), pady=px(4)), bg="chrome")
+        self.tabbar.pack(side=tk.TOP, fill=tk.X, pady=(0, px(8)))
         self.grid_frame = None
         self._show_placeholder("從左邊選一個資料夾，或按「瀏覽目錄」")
 
@@ -329,19 +263,54 @@ class FinderApp:
         self.column_keys = None
         self.columns = {}
         image = self.icons.get(icon)
-        tk.Label(self.grid_frame, text=f" {text}" if image else text, image=image or "", compound="left",
-                 bg=C["bg_main"], fg=C["fg_dim"], font=(FONT, 12)).pack(expand=True)
+        self.theme.paint(tk.Label(self.grid_frame, text=f" {text}" if image else text, image=image or "",
+                                  compound="left", font=FONTS["body"]), bg="bg", fg="muted").pack(expand=True)
 
     def _new_grid_frame(self):
         if self.grid_frame is not None:
             self.grid_frame.destroy()
-        self.grid_frame = tk.Frame(self.right, bg=C["bg_main"])
+        self.hover = None
+        self.grid_frame = self.theme.paint(tk.Frame(self.right), bg="bg")
         self.grid_frame.pack(fill=tk.BOTH, expand=True)
 
-    def set_status(self, text, warn=False, icon=None):
+    def set_status(self, text, detail="", warn=False, icon=None):
         image = self.icons.get("⚠" if warn and icon is None else icon)
-        self.status.config(text=f" {text}" if image else text, image=image or "",
-                           fg=C["warn"] if warn else C["info"])
+        self.status.set(text, detail, "warn" if warn else "info", image)
+
+    def _set_hover(self, tree, iid):
+        """滑鼠移過的清單列加上 hover 底色；選取列維持 soft 底。"""
+        if self.hover == (tree, iid) or (self.hover is None and not iid):
+            return
+        if self.hover:
+            old_tree, old = self.hover
+            try:
+                if old_tree.exists(old):
+                    old_tree.item(old, tags=[x for x in old_tree.item(old, "tags") if x != "hover"])
+            except tk.TclError:  # 清單已經重建
+                pass
+        self.hover = None
+        if tree is not None and iid and tree.item(iid, "text") != "dummy":
+            tree.item(iid, tags=list(tree.item(iid, "tags")) + ["hover"])
+            self.hover = (tree, iid)
+
+    # ==========================================
+    # 深淺色主題
+    # ==========================================
+    def toggle_theme(self):
+        name = "light" if self.theme.dark else "dark"
+        self.theme.set(name)
+        self.config.theme = name
+        self._save_config()
+
+    def _on_theme_changed(self):
+        self._style_tree(self.tree)
+        for col in self.columns.values():
+            self._style_tree(col[2])
+        self._refresh_tab_bar()
+        self._refresh_theme_button()
+
+    def _refresh_theme_button(self):
+        self.theme_button.configure(text=THEME_NAMES[self.theme.name])
 
     def _focus_search(self):
         self.search_entry.focus_set()
@@ -470,9 +439,7 @@ class FinderApp:
         path = self.nodes.get(node)
         if not path:
             return
-        menu = tk.Menu(self.root, tearoff=0, bg=C["bg_panel"], fg=C["fg_highlight"],
-                       activebackground=C["accent"], activeforeground=C["fg_highlight"], borderwidth=0,
-                       font=(FONT, 9))
+        menu = popup_menu(self.root, self.theme)
         menu.add_command(label=" 在新分頁開啟", image=self.icons.get("📂") or "", compound="left",
                          command=lambda: self.new_tab(path))
         if not self.tab.pinned:
@@ -494,50 +461,74 @@ class FinderApp:
     # 分頁
     # ==========================================
     def _refresh_tab_bar(self):
+        """分頁軌道：chrome 底；目前分頁 panel 底、accent 粗體字，其他 muted 字，滑鼠移過 hover 底。"""
+        th, px = self.theme, self.px
         for w in self.tabbar.winfo_children():
             w.destroy()
         self.tab_cells = []
         for i, t in enumerate(self.tabset.tabs):
             active = i == self.tabset.active
-            bg = C["bg_panel"] if active else C["bg_main"]
-            fg = C["fg_highlight"] if active else C["fg_dim"]
-            cell = tk.Frame(self.tabbar, bg=bg)
-            cell.pack(side=tk.LEFT, padx=(0, 2))
-            stripe = tk.Frame(cell, bg=C["accent"] if active else bg, height=2)
-            stripe.pack(side=tk.TOP, fill=tk.X)
+            bg = "panel" if active else "chrome"
+            cell = th.paint(tk.Frame(self.tabbar, cursor="hand2"), bg=bg)
+            cell.pack(side=tk.LEFT, padx=(0, px(2)))
             title = t.title if len(t.title) <= 18 else t.title[:17] + "…"
             icon = "📌" if t.pinned else "📂" if active else "📁"
-            label = tk.Label(cell, text=f" {title}", image=self.icons.get(icon) or "",
-                             compound="left", bg=bg, fg=fg, font=(FONT, 9), padx=8, pady=3, cursor="hand2")
-            label.pack(side=tk.LEFT)
+            label = th.paint(tk.Label(cell, text=f" {title}", image=self.icons.get(icon) or "", compound="left",
+                                      font=FONTS["body-strong" if active else "body"], borderwidth=0, padx=0,
+                                      pady=0, cursor="hand2"), bg=bg, fg="accent" if active else "muted")
+            parts = [cell, label]
             if t.pinned:
-                # 釘選的分頁沒有關閉鈕，右邊留一點空間讓寬度接近一般分頁
-                tk.Frame(cell, bg=bg, width=6).pack(side=tk.LEFT)
+                # 釘選的分頁沒有關閉鈕
+                label.pack(side=tk.LEFT, padx=px(12), pady=px(6))
                 tip = f"{t.folder}\n已釘選：每次開啟都會打開（右鍵可取消釘選）"
             else:
-                close = tk.Label(cell, text="✕", bg=bg, fg=C["fg_dim"], font=(FONT, 8), padx=6, cursor="hand2")
-                close.pack(side=tk.LEFT)
+                label.pack(side=tk.LEFT, padx=(px(12), px(2)), pady=px(6))
+                close = th.paint(tk.Label(cell, text="✕", font=FONTS["caption"], borderwidth=0, padx=px(4),
+                                          pady=0, cursor="hand2"), bg=bg, fg="muted")
+                close.pack(side=tk.LEFT, padx=(0, px(8)))
                 close.bind("<Button-1>", lambda e, i=i: self.close_tab(i))
-                close.bind("<Enter>", lambda e, w=close: w.config(fg=C["fg_highlight"]))
-                close.bind("<Leave>", lambda e, w=close: w.config(fg=C["fg_dim"]))
+                parts.append(close)
                 tip = t.folder or "空白分頁：從左邊選一個資料夾"
-            for w in (cell, stripe, label):
+            for w in (cell, label):
                 w.bind("<ButtonPress-1>", lambda e, i=i: self._tab_press(e, i))
                 w.bind("<B1-Motion>", self._tab_drag)
                 w.bind("<ButtonRelease-1>", self._tab_release)
                 w.bind("<Button-2>", lambda e, i=i: self.close_tab(i))
                 w.bind("<Button-3>", lambda e, i=i: self._tab_menu(e, i))
-                w.bind("<Enter>", lambda e, i=i, tip=tip: self.drag or self.tip.schedule(
-                    ("tab", i, tip), tip, e.x_root, e.y_root))
-                w.bind("<Leave>", lambda e: self.tip.hide())
+            for w in parts:
+                for sequence in ("<Enter>", "<Leave>"):
+                    w.bind(sequence, lambda e, i=i, tip=tip, parts=parts, active=active:
+                           self._tab_crossing(e, i, tip, parts, active))
             self.tab_cells.append(cell)
-        plus = tk.Label(self.tabbar, text="＋", bg=C["bg_main"], fg=C["fg_text"], font=(FONT, 10), padx=8,
-                        cursor="hand2")
+        plus = th.paint(tk.Label(self.tabbar, text="＋", font=FONTS["body"], borderwidth=0, padx=px(10),
+                                 pady=px(6), cursor="hand2"), bg="chrome", fg="muted")
         plus.pack(side=tk.LEFT)
         plus.bind("<Button-1>", lambda e: self.new_tab())
-        plus.bind("<Enter>", lambda e: self.tip.schedule(("tab", "+"), "新分頁（Ctrl+T）", e.x_root, e.y_root))
-        plus.bind("<Leave>", lambda e: self.tip.hide())
-        self.drop_marker = tk.Frame(self.tabbar, bg=C["link"], width=3)
+        plus.bind("<Enter>", lambda e: plus.configure(bg=th["hover"], fg=th["text"]))
+        plus.bind("<Leave>", lambda e: th.repaint(plus))
+        self.tip.attach(plus, "新分頁（Ctrl+T）")
+        self.drop_marker = th.paint(tk.Frame(self.tabbar, width=px(2)), bg="accent")
+
+    def _tab_crossing(self, event, index, tip, parts, active):
+        """滑鼠進出分頁（含裡面的文字和叉叉）：整個分頁一起變 hover 底，叉叉單獨變亮。"""
+        th, cell = self.theme, parts[0]
+        try:
+            under = cell.winfo_containing(*self.root.winfo_pointerxy())
+        except (KeyError, tk.TclError):
+            under = None
+        inside = under is not None and (str(under) == str(cell) or str(under).startswith(str(cell) + "."))
+        for w in parts:
+            th.repaint(w)
+        if inside and not active:
+            for w in parts:
+                w.configure(bg=th["hover"])
+            parts[1].configure(fg=th["text"])
+        if len(parts) > 2 and under is parts[2]:
+            parts[2].configure(fg=th["text"])
+        if inside and not self.drag:
+            self.tip.schedule(("tab", index, tip), tip, event.x_root, event.y_root)
+        elif not inside:
+            self.tip.hide()
 
     # 拖曳分頁：按下時先記住，移動超過一點點才算拖曳，放開時沒拖曳就當成點一下
     def _tab_press(self, event, index):
@@ -587,9 +578,7 @@ class FinderApp:
     def _tab_menu(self, event, index):
         self.tip.hide()
         t = self.tabset.tabs[index]
-        menu = tk.Menu(self.root, tearoff=0, bg=C["bg_panel"], fg=C["fg_highlight"],
-                       activebackground=C["accent"], activeforeground=C["fg_highlight"], borderwidth=0,
-                       font=(FONT, 9))
+        menu = popup_menu(self.root, self.theme)
 
         def item(label, icon, command, enabled=True):
             menu.add_command(label=f" {label}", image=self.icons.get(icon) or "", compound="left", command=command,
@@ -617,7 +606,7 @@ class FinderApp:
         self._tabs_changed()
         self._refresh_tab_bar()
         if pinned:
-            self.set_status(f"已釘選：{folder}　｜　每次開啟都會打開這個分頁", icon="📌")
+            self.set_status(f"已釘選：{folder}", "每次開啟都會打開這個分頁", icon="📌")
         else:
             self.set_status(f"已取消釘選：{folder}", icon="📌")
 
@@ -702,7 +691,7 @@ class FinderApp:
             self.render()
             self.refresh_quietly(path)
             return
-        self.set_status(f"掃描中…　{path}（深度 {scan_depth_for(path)}）", icon="⏳")
+        self.set_status("掃描中…", f"{path}{SEP}掃描深度 {scan_depth_for(path)}", icon="⏳")
         self._show_placeholder("掃描中…", icon="⏳")
         self._start_scan(path)
 
@@ -791,10 +780,11 @@ class FinderApp:
             var = self.group_vars.get(g["name"])
             if var is None:
                 var = self.group_vars[g["name"]] = tk.BooleanVar(value=g["on"])
-            self._checkbox(self.filter_frame, g["name"], var, lambda n=g["name"]: self._on_group_toggled(n),
-                           icon=g["icon"] if self.icons.get(g["icon"]) else "📁").pack(side=tk.LEFT, padx=3)
-        self._checkbox(self.filter_frame, OTHERS_NAME, self.others_var, self._on_others_toggled,
-                       icon=OTHERS_ICON).pack(side=tk.LEFT, padx=3)
+            icon = self.icons.get(g["icon"]) or self.icons.get("📁")
+            checkbox(self.filter_frame, self.theme, g["name"], var, lambda n=g["name"]: self._on_group_toggled(n),
+                     icon).pack(side=tk.LEFT, padx=(0, self.px(8)))
+        checkbox(self.filter_frame, self.theme, OTHERS_NAME, self.others_var, self._on_others_toggled,
+                 self.icons.get(OTHERS_ICON)).pack(side=tk.LEFT, padx=(0, self.px(8)))
 
     def _on_group_toggled(self, name):
         self.config.group_states[name] = self.group_vars[name].get()
@@ -833,9 +823,7 @@ class FinderApp:
         self.render()
 
     def _refresh_time_buttons(self):
-        for value, btn in self.time_buttons.items():
-            on = value == self.tab.time_filter
-            btn.config(bg=C["accent"] if on else C["bg_element"], fg=C["fg_highlight"] if on else C["fg_text"])
+        self.time_filter.select(self.tab.time_filter)
 
     def _since(self):
         v, now = self.tab.time_filter, datetime.now()
@@ -855,7 +843,9 @@ class FinderApp:
         self.search_after = self.root.after(200, self._apply_search)
 
     def _apply_search(self):
-        self.search_after = None
+        if self.search_after:  # 直接呼叫時（例如自我測試），取消還在排程中的那一次
+            self.root.after_cancel(self.search_after)
+            self.search_after = None
         self.tab.query = self.search_var.get()
         self.tab.expanded.clear()
         self.render()
@@ -894,15 +884,16 @@ class FinderApp:
         for key, top in scroll.items():
             self.columns[key][2].yview_moveto(top)
 
-        status = f"{res.root}　｜　掃描深度 {res.depth}　｜　{len(res.files):,} 個檔案　｜　{res.elapsed:.2f} 秒"
+        detail = [f"掃描深度 {res.depth}", f"{len(res.files):,} 個檔案", f"{res.elapsed:.2f} 秒"]
         if filtering:
             shown = sum(len(v) for v in by_group.values()) + (len(others) if has_others else 0)
-            status += f"　｜　符合條件 {shown:,} 個"
+            detail.append(f"符合條件 {shown:,} 個")
         if note:
-            status += f"　｜　{note}"
+            detail.append(note)
         if res.unreadable:
-            status += f"　｜　{len(res.unreadable)} 個資料夾無法讀取（點這裡查看）"
-        self.set_status(status, warn=bool(res.unreadable), icon="⚠" if res.unreadable else "📂")
+            detail.append(f"{len(res.unreadable)} 個資料夾無法讀取（點這裡查看）")
+        self.set_status(res.root, SEP.join(detail), warn=bool(res.unreadable),
+                        icon="⚠" if res.unreadable else "📂")
 
     def _build_columns(self, active, has_others):
         self._new_grid_frame()
@@ -910,28 +901,33 @@ class FinderApp:
         specs = [(g["name"], g["name"], g["icon"]) for g in active]
         if has_others:
             specs.append((OTHERS_KEY, "其他", OTHERS_ICON))
+        t, px = self.theme, self.px
         if not specs:
-            tk.Label(self.grid_frame, text="上方「顯示分類」至少勾選一個", bg=C["bg_main"], fg=C["fg_dim"],
-                     font=(FONT, 12)).pack(expand=True)
+            t.paint(tk.Label(self.grid_frame, text="上方「顯示分類」至少勾選一個", font=FONTS["body"]),
+                    bg="bg", fg="muted").pack(expand=True)
             return
         for key, title, icon in specs:
-            frame = tk.LabelFrame(self.grid_frame, bg=C["bg_panel"])
+            # 分欄：直角加 1px line 框；標題列是卡片標題，後面接檔案數
+            frame = box(self.grid_frame, t)
+            head = t.paint(tk.Frame(frame, padx=px(12), pady=px(8)), bg="panel")
+            head.pack(side=tk.TOP, fill=tk.X)
             image = self.icons.get(icon) or self.icons.get("📁")
-            title_label = tk.Label(frame, text=f" {title}", image=image or "", compound="left",
-                                   font=(FONT, 10, "bold"), bg=C["bg_panel"], fg=C["fg_highlight"])
-            frame.configure(labelwidget=title_label)
-            inner = tk.Frame(frame, bg=C["bg_panel"])
+            title_label = t.paint(tk.Label(head, text=f" {title}", image=image or "", compound="left",
+                                           font=FONTS["card-title"], borderwidth=0, padx=0), bg="panel", fg="text")
+            title_label.pack(side=tk.LEFT)
+            count_label = t.paint(tk.Label(head, font=FONTS["caption"], borderwidth=0, padx=0),
+                                  bg="panel", fg="muted")
+            count_label.pack(side=tk.LEFT, padx=(px(8), 0))
+            inner = t.paint(tk.Frame(frame), bg="panel")
             inner.pack(fill=tk.BOTH, expand=True)
-            tree = ttk.Treeview(inner, show="tree headings", selectmode="browse", style="Files.Treeview")
-            tree.heading("#0", text="時間 | 檔名", anchor="w")
+            tree = ttk.Treeview(inner, show="tree headings", selectmode="browse", style="Flat.Treeview")
+            tree.heading("#0", text=f"時間{SEP}檔名", anchor="w")
             tree.column("#0", stretch=True, width=200, minwidth=120)
             scroll = ttk.Scrollbar(inner, orient="vertical", command=tree.yview)
             tree.configure(yscrollcommand=scroll.set)
             tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             scroll.pack(side=tk.RIGHT, fill=tk.Y)
-            tree.tag_configure("year", foreground=C["year_fg"], background=C["year_bg"])
-            tree.tag_configure("more", foreground=C["link"])
-            tree.tag_configure("empty", foreground=C["fg_dim"])
+            self._style_tree(tree)
             tree.bind("<Double-1>", self._on_file_activate)
             tree.bind("<Return>", self._on_file_activate)
             tree.bind("<ButtonRelease-1>", self._on_file_click)
@@ -941,8 +937,8 @@ class FinderApp:
             tree.bind("<Control-c>", self._on_file_copy)
             tree.bind("<Control-C>", self._on_file_copy)
             tree.bind("<Motion>", self._on_motion)
-            tree.bind("<Leave>", lambda e: self.tip.hide())
-            self.columns[key] = (frame, title_label, tree, title)
+            tree.bind("<Leave>", self._on_leave_list)
+            self.columns[key] = (frame, count_label, tree, title)
 
         n = len(specs)
         cols = n if n <= 3 else 2 if n == 4 else 3 if n <= 6 else 4
@@ -951,17 +947,21 @@ class FinderApp:
             self.grid_frame.grid_columnconfigure(i, weight=1, uniform="col")
         for i in range(rows):
             self.grid_frame.grid_rowconfigure(i, weight=1, uniform="row")
+        gap = px(6)  # 欄與欄之間 12px，外緣跟分頁軌道對齊
         for idx, (key, _, _) in enumerate(specs):
-            self.columns[key][0].grid(row=idx // cols, column=idx % cols, sticky="nsew", padx=4, pady=4)
+            r, c = divmod(idx, cols)
+            self.columns[key][0].grid(row=r, column=c, sticky="nsew",
+                                      padx=(gap if c else 0, gap if c < cols - 1 else 0),
+                                      pady=(gap if r else 0, gap if r < rows - 1 else 0))
 
     def _next_iid(self):
         self.item_seq += 1
         return f"item_{self.item_seq}"
 
     def _fill_column(self, key, files, icon, page, filtering):
-        frame, title_label, tree, title = self.columns[key]
+        frame, count_label, tree, title = self.columns[key]
         tree.delete(*tree.get_children())
-        title_label.config(text=f" {title}　{len(files):,} ")
+        count_label.config(text=f"{len(files):,} 個")
         if not files:
             tree.insert("", tk.END, text="   （沒有符合條件的檔案）" if filtering else "   （沒有檔案）", tags=("empty",))
             return
@@ -979,7 +979,7 @@ class FinderApp:
             self.item_files[iid] = f
         if len(files) > limit:
             iid = self._next_iid()
-            tree.insert("", tk.END, iid=iid, text=f"   ⋯ 還有 {len(files) - limit:,} 份，點這裡顯示全部", tags=("more",))
+            tree.insert("", tk.END, iid=iid, text=f"   還有 {len(files) - limit:,} 份，點這裡顯示全部", tags=("more",))
             self.more_items[iid] = key
 
     # ==========================================
@@ -1001,16 +1001,22 @@ class FinderApp:
         sel = event.widget.selection()
         f = self.item_files.get(sel[0]) if sel else None
         if f:
-            self.set_status(f"{f.rel_path}　｜　{format_size(f.size)}　｜　"
+            self.set_status(f.rel_path, f"{format_size(f.size)}{SEP}"
                             f"修改於 {datetime.fromtimestamp(f.mtime):%Y-%m-%d %H:%M}", icon="📄")
 
     def _on_motion(self, event):
-        iid = event.widget.identify_row(event.y)
+        tree = event.widget
+        iid = tree.identify_row(event.y)
+        self._set_hover(tree, iid if iid in self.item_files or iid in self.more_items else None)
         f = self.item_files.get(iid)
         if f:
             self.tip.schedule(iid, f.rel_path, event.x_root, event.y_root)
         else:
             self.tip.hide()
+
+    def _on_leave_list(self, event):
+        self.tip.hide()
+        self._set_hover(None, None)
 
     def _on_right_click(self, event):
         tree = event.widget
@@ -1021,9 +1027,7 @@ class FinderApp:
         tree.selection_set(iid)
         tree.focus(iid)
         self.tip.hide()
-        menu = tk.Menu(self.root, tearoff=0, bg=C["bg_panel"], fg=C["fg_highlight"],
-                       activebackground=C["accent"], activeforeground=C["fg_highlight"], borderwidth=0,
-                       font=(FONT, 9))
+        menu = popup_menu(self.root, self.theme)
 
         def item(label, icon, command, accelerator=""):
             menu.add_command(label=f" {label}", image=self.icons.get(icon) or "", compound="left", command=command,
