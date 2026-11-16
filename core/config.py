@@ -11,15 +11,15 @@ LEGACY_CONFIG_NAME = "explorer_config.json"  # 舊版「專案檔案速查儀表
 THEMES = ("light", "dark")
 
 DEFAULT_GROUPS = [
-    {"name": "PDF 報告", "icon": "📄", "exts": [".pdf"], "default_on": True},
-    {"name": "CAD 圖面", "icon": "📐", "exts": [".dwg", ".dxf", ".dgn", ".dwf"], "default_on": True},
-    {"name": "簡報", "icon": "📊", "exts": [".ppt", ".pptx", ".odp"], "default_on": True},
-    {"name": "試算表", "icon": "📈", "exts": [".xlsx", ".xls", ".xlsm", ".csv", ".ods"], "default_on": True},
-    {"name": "文件", "icon": "📝", "exts": [".docx", ".doc", ".odt", ".rtf"], "default_on": False},
-    {"name": "圖片", "icon": "📷", "exts": [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".heic"], "default_on": False},
-    {"name": "GIS 圖資", "icon": "📍", "exts": [".shp", ".kml", ".kmz", ".geojson", ".gpkg", ".las", ".laz"], "default_on": False},
-    {"name": "影片", "icon": "🎬", "exts": [".mp4", ".mov", ".mts", ".avi"], "default_on": False},
-    {"name": "壓縮檔", "icon": "📦", "exts": [".zip", ".7z", ".rar"], "default_on": False},
+    {"name": "PDF 報告", "icon": "file", "exts": [".pdf"], "default_on": True},
+    {"name": "CAD 圖面", "icon": "ruler", "exts": [".dwg", ".dxf", ".dgn", ".dwf"], "default_on": True},
+    {"name": "簡報", "icon": "slides", "exts": [".ppt", ".pptx", ".odp"], "default_on": True},
+    {"name": "試算表", "icon": "table", "exts": [".xlsx", ".xls", ".xlsm", ".csv", ".ods"], "default_on": True},
+    {"name": "文件", "icon": "file-text", "exts": [".docx", ".doc", ".odt", ".rtf"], "default_on": False},
+    {"name": "圖片", "icon": "image", "exts": [".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".heic"], "default_on": False},
+    {"name": "GIS 圖資", "icon": "pin", "exts": [".shp", ".kml", ".kmz", ".geojson", ".gpkg", ".las", ".laz"], "default_on": False},
+    {"name": "影片", "icon": "video", "exts": [".mp4", ".mov", ".mts", ".avi"], "default_on": False},
+    {"name": "壓縮檔", "icon": "package", "exts": [".zip", ".7z", ".rar"], "default_on": False},
 ]
 
 
@@ -27,6 +27,11 @@ def app_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(os.path.abspath(sys.executable))
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def assets_dir() -> str:
+    """圖示與標誌：打包後在 _internal/assets（sys._MEIPASS），從原始碼執行時在專案的 assets。"""
+    return os.path.join(getattr(sys, "_MEIPASS", app_dir()), "assets")
 
 
 def _appdata_path() -> str:
@@ -110,9 +115,9 @@ class Config:
     def groups(self):
         """預設分類加上自訂分類，並套用記住的勾選狀態。"""
         result = []
-        for g in DEFAULT_GROUPS + self.custom_groups:
+        # 自訂分類一律用資料夾圖示（舊版設定檔存的是 emoji，不再使用）
+        for g in DEFAULT_GROUPS + [dict(c, icon="folder") for c in self.custom_groups]:
             g = dict(g)
-            g.setdefault("icon", "📁")
             g["on"] = self.group_states.get(g["name"], g.get("default_on", True))
             result.append(g)
         return result
@@ -126,7 +131,7 @@ class Config:
             ext = "." + ext
         if any(ext in g["exts"] for g in DEFAULT_GROUPS + self.custom_groups):
             return None
-        group = {"name": f"{ext.upper()} 檔", "icon": "📁", "exts": [ext], "default_on": True}
+        group = {"name": f"{ext.upper()} 檔", "icon": "folder", "exts": [ext], "default_on": True}
         self.custom_groups.append(group)
         self.group_states[group["name"]] = True
         return group

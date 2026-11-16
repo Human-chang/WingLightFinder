@@ -91,7 +91,7 @@ class CopyFileUiTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def _file_tree(self):
-        for _, _, tree, _ in self.app.columns.values():
+        for _, _, tree, _, _ in self.app.columns.values():
             for iid in tree.get_children():
                 if iid in self.app.item_files:
                     return tree, iid
@@ -114,7 +114,7 @@ class CopyFileUiTest(unittest.TestCase):
         self.assertEqual(self.copied, [])
 
     def test_ctrl_c_bound_only_on_file_lists(self):
-        for _, _, tree, _ in self.app.columns.values():
+        for _, _, tree, _, _ in self.app.columns.values():
             self.assertIn("_on_file_copy", tree.bind("<Control-c>"))
             self.assertIn("_on_file_copy", tree.bind("<Control-C>"))
         # 搜尋框、視窗、全域都不攔 Ctrl+C，搜尋框照常複製文字

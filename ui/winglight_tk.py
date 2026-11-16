@@ -1,25 +1,34 @@
 # -*- coding: utf-8 -*-
-"""WingLight 設計規範第 6 版：Tkinter 用的色票、深淺色主題與元件（只用 Python 標準庫）。
+"""WingLight 設計規範：純 Tkinter 用的色票、深淺色主題、線條圖示與元件（只用 Python 標準庫）。
 
-複製到新專案（例如 ui/winglight_tk.py）後：
+這個檔在 WingLightFinder 實際使用（ui/winglight_tk.py）；設計規範 kit/winglight_tk.py 是同一份，改了要兩邊一起改。
+複製到新專案後：
 
     ctypes.windll.shcore.SetProcessDpiAwareness(1)   # 在建立 Tk() 之前
     root = tk.Tk()
     theme = Theme(root, 設定檔裡的主題 or system_theme())
+    icons = Icons(theme, "assets/icons")              # make_icons.py 轉好的遮罩 PNG
     bar = theme.paint(tk.Frame(root), bg="chrome")
-    tool_button(bar, theme, "重新掃描", rescan).pack(side=tk.LEFT)
-    theme.set("dark")   # 即時切換：登記過的元件、ttk 樣式、標題列一起換
+    tool_button(bar, theme, "重新掃描", rescan, icons.get("refresh")).pack(side=tk.LEFT)
+    theme.set("dark")   # 即時切換：登記過的元件、ttk 樣式、圖示、標題列一起換
 
 - 色票名稱與 tokens.json 相同，每個值是 (淺色, 深色)。theme["accent"] 取目前主題的顏色。
 - Tk 沒有樣式表：元件建立時用 theme.paint(元件, 選項=色票名) 登記，切換主題時逐一重設；
   ttk.Treeview 的 tag 這類登記不了的顏色，用 theme.on_change(函式) 在切換後自己重設。
+- 圖示：icons.get("folder", "accent") 回傳塗好色的 PhotoImage。切換主題時就地重塗同一張圖，
+  用到它的元件不必重設。執行時不需要 Pillow：遮罩 PNG 用 zlib 解開，塗色後再組成 PNG 交給 Tk。
 - tk.Frame 做不出圓角：卡片、清單外框一律直角加 1px line 框（box），不要用圖片硬拼。
 - 不要把 emoji 寫進 Tk 文字：啟動會慢好幾秒，帶 U+FE0F 的會變方框。小圖示用 PNG。
 """
 
+import base64
 import ctypes
+import math
+import os
+import struct
 import tkinter as tk
 import tkinter.font as tkfont
+import zlib
 from ctypes import wintypes
 from tkinter import ttk
 
@@ -98,15 +107,35 @@ def set_title_bar_dark(toplevel, dark):
         pass
 
 
+def animations_enabled():
+    """Windows「顯示動畫效果」關掉時回傳 False（SPI_GETCLIENTAREAANIMATION）：處理中的圓點就不閃，停在最亮。"""
+    try:
+        value = wintypes.BOOL(True)
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(value), 0):
+            return bool(value.value)
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
+ICON_SIZES = (16, 20, 24, 32)
+
+
+def icon_size(scale, px=16):
+    """要顯示 px 大小的圖示時用哪一張：不小於 px × 縮放倍率的最小那張（100% 用 16、125% 用 20、150% 用 24）。"""
+    want = px * scale
+    return next((s for s in ICON_SIZES if s >= want - 0.5), ICON_SIZES[-1])
+
+
 class Theme:
     """目前的主題、登記過的元件與 ttk 樣式。"""
 
     def __init__(self, root, name="light", scale=None, icon_px=None):
-        """icon_px：清單裡實際載入的圖示邊長（像素），列高至少要放得下；None 代表 16px × 縮放倍率。"""
+        """icon_px：清單裡實際載入的圖示邊長（像素），列高至少要放得下；None 代表依縮放挑的那張（icon_size）。"""
         self.root = root
         self.name = name if name in THEMES else "light"
         self.scale = scale or max(1.0, root.winfo_fpixels("1i") / 96)
-        self.icon_px = icon_px or self.px(16)
+        self.icon_px = icon_px or icon_size(self.scale)
         self._items = {}
         self._limit = 500
         self._callbacks = []
@@ -207,6 +236,269 @@ class Theme:
 
 
 # ==========================================
+# 線條圖示：make_icons.py 的遮罩 PNG，執行時塗色（只用 zlib，不需要 Pillow）
+# ==========================================
+class Mask:
+    """灰階遮罩：rows 的每一列是 bytes，值＝不透明度（0～255）。"""
+
+    __slots__ = ("width", "height", "rows")
+
+    def __init__(self, width, height, rows):
+        self.width, self.height, self.rows = width, height, rows
+
+
+def read_mask(path):
+    """讀 make_icons.py 輸出的 8 位元灰階 PNG（<名稱>_<尺寸>.png）。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"不是 PNG：{path}")
+    pos, idat, header = 8, [], None
+    while pos + 8 <= len(data):
+        length, kind = struct.unpack(">I4s", data[pos:pos + 8])
+        body = data[pos + 8:pos + 8 + length]
+        if kind == b"IHDR":
+            header = struct.unpack(">IIBBBBB", body)
+        elif kind == b"IDAT":
+            idat.append(body)
+        elif kind == b"IEND":
+            break
+        pos += 12 + length
+    if header is None or header[2:5] != (8, 0, 0) or header[6]:
+        raise ValueError(f"只支援 8 位元灰階、不交錯的 PNG：{path}")
+    width, height = header[:2]
+    raw = zlib.decompress(b"".join(idat))
+    rows, prev = [], bytearray(width)
+    for y in range(height):
+        start = y * (width + 1)
+        kind, line = raw[start], bytearray(raw[start + 1:start + 1 + width])
+        # PNG 的五種逐列濾波（每個像素 1 位元組）
+        for i in range(width) if kind else ():
+            left = line[i - 1] if i else 0
+            if kind == 1:
+                line[i] = (line[i] + left) & 255
+            elif kind == 2:
+                line[i] = (line[i] + prev[i]) & 255
+            elif kind == 3:
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 255
+            elif kind == 4:
+                up_left = prev[i - 1] if i else 0
+                p = left + prev[i] - up_left
+                pa, pb, pc = abs(p - left), abs(p - prev[i]), abs(p - up_left)
+                line[i] = (line[i] + (left if pa <= pb and pa <= pc else prev[i] if pb <= pc else up_left)) & 255
+            else:
+                raise ValueError(f"不認得的 PNG 濾波 {kind}：{path}")
+        rows.append(bytes(line))
+        prev = line
+    return Mask(width, height, rows)
+
+
+def rotate_mask(mask, quarter_turns):
+    """逆時針轉 90° × quarter_turns。規範只有 chevron-down，朝右、朝上用轉的。"""
+    for _ in range(quarter_turns % 4):
+        w, h, rows = mask.width, mask.height, mask.rows
+        mask = Mask(h, w, [bytes(rows[x][w - 1 - y] for x in range(h)) for y in range(w)])
+    return mask
+
+
+def shape_mask(width, height, inside, samples=4):
+    """畫一個形狀的遮罩：inside(x, y) 判斷點在不在形狀裡，每個像素取 samples × samples 點平均，邊緣才平滑。"""
+    n, rows = samples * samples, []
+    offsets = [(i + 0.5) / samples for i in range(samples)]
+    for y in range(height):
+        row = bytearray(width)
+        for x in range(width):
+            hit = sum(1 for dy in offsets for dx in offsets if inside(x + dx, y + dy))
+            row[x] = (255 * hit + n // 2) // n
+        rows.append(bytes(row))
+    return Mask(width, height, rows)
+
+
+def round_rect(x0, y0, x1, y1, r):
+    """圓角矩形的 inside 判斷，給 shape_mask 用。"""
+    def inside(x, y):
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            return False
+        cx, cy = min(max(x, x0 + r), x1 - r), min(max(y, y0 + r), y1 - r)
+        return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+    return inside
+
+
+def _rgb(color):
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5))
+
+
+def _png_rgba(width, height, pixels):
+    def chunk(kind, body):
+        return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
+    stride = width * 4
+    raw = b"".join(b"\0" + bytes(pixels[y * stride:(y + 1) * stride]) for y in range(height))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def render(width, height, layers):
+    """把遮罩塗色後由下往上疊：layers 是 [(遮罩, "#RRGGBB", 不透明度, (x, y)), ...]。
+    回傳 base64 的 PNG，給 tk.PhotoImage(data=…) 或 image.configure(data=…)。"""
+    pixels = bytearray(width * height * 4)
+    if len(layers) == 1 and layers[0][0].width == width and layers[0][3] == (0, 0):
+        # 只有一層（一般的圖示）：整排一起塗，比逐點快很多
+        mask, color, opacity, _ = layers[0]
+        alpha = b"".join(mask.rows)
+        if opacity < 1:
+            alpha = bytes(round(a * opacity) for a in alpha)
+        r, g, b = _rgb(color)
+        count = width * height
+        pixels[0::4], pixels[1::4], pixels[2::4], pixels[3::4] = bytes([r]) * count, bytes([g]) * count, \
+            bytes([b]) * count, alpha
+    else:
+        for mask, color, opacity, (ox, oy) in layers:
+            cr, cg, cb = _rgb(color)
+            for y in range(mask.height):
+                for x, a in enumerate(mask.rows[y]):
+                    if not a:
+                        continue
+                    i = ((oy + y) * width + ox + x) * 4
+                    top = a * opacity / 255
+                    if top <= 0:
+                        continue
+                    below = pixels[i + 3] / 255
+                    out = top + below * (1 - top)
+                    keep = below * (1 - top) / out
+                    pixels[i] = round(cr * top / out + pixels[i] * keep)
+                    pixels[i + 1] = round(cg * top / out + pixels[i + 1] * keep)
+                    pixels[i + 2] = round(cb * top / out + pixels[i + 2] * keep)
+                    pixels[i + 3] = round(out * 255)
+    return base64.b64encode(_png_rgba(width, height, pixels)).decode("ascii")
+
+
+class Icons:
+    """make_icons.py 轉好的遮罩（<名稱>_<尺寸>.png），依目前主題塗色。
+
+    同一個（名稱, 色票, 旋轉）只建一張 PhotoImage；切換主題時就地重塗，用到它的元件、ttk 元素都不必重設。
+    尺寸依螢幕縮放挑（icon_size）；找不到檔案時 get() 回傳 None，介面照樣能用，只是少了圖示。"""
+
+    def __init__(self, theme, icon_dir, px=16):
+        self.theme = theme
+        self.root = theme.root
+        self.dir = icon_dir
+        self.size = icon_size(theme.scale, px)
+        self._masks = {}
+        self._images = {}   # key → (PhotoImage, 寬, 高, [(遮罩, 色票, 不透明度, 位置), ...])
+        theme.on_change(self.recolor)
+
+    def mask(self, name, rotate=0):
+        key = (name, rotate % 4)
+        if key not in self._masks:
+            try:
+                self._masks[key] = rotate_mask(read_mask(os.path.join(self.dir, f"{name}_{self.size}.png")), rotate)
+            except (OSError, ValueError, zlib.error):
+                self._masks[key] = None
+        return self._masks[key]
+
+    def get(self, name, color="muted", rotate=0):
+        """name：規範 Icons 群組的檔名（不含 .svg）；color：色票名；rotate：逆時針轉幾個 90°。"""
+        if not name:
+            return None
+        mask = self.mask(name, rotate)
+        if mask is None:
+            return None
+        return self.compose(("icon", name, color, rotate % 4), mask.width, mask.height, [(mask, color, 1, (0, 0))])
+
+    def compose(self, key, width, height, layers):
+        """自己疊的圖（例如勾選框）：layers 是 [(遮罩, 色票, 不透明度, (x, y)), ...]，切換主題時一樣重塗。"""
+        if key not in self._images:
+            image = tk.PhotoImage(master=self.root, data=self._render(width, height, layers))
+            self._images[key] = (image, width, height, layers)
+        return self._images[key][0]
+
+    def blank(self):
+        """透明的空白圖，跟圖示一樣大。"""
+        if "blank" not in self._images:
+            self._images["blank"] = (tk.PhotoImage(master=self.root, width=self.size, height=self.size), 0, 0, [])
+        return self._images["blank"][0]
+
+    def checkbox(self, checked, gap=0):
+        """規範 Input 的勾選框：圓角 4px；沒勾 panel 底、1px muted 框，勾了 accent 填色、on-accent 打勾。
+        gap：右邊留給文字的間距（Tk 的圖文之間沒有空隙）。"""
+        s, t = self.size, self.theme
+        border, radius = max(1, t.px(1)), t.px(4)
+        outer = self._shape(("box", s), s, s, round_rect(0, 0, s, s, radius))
+        inner = self._shape(("box-inner", s, border), s - 2 * border, s - 2 * border,
+                            round_rect(0, 0, s - 2 * border, s - 2 * border, max(0, radius - border)))
+        if checked:
+            layers = [(outer, "accent", 1, (0, 0))]
+            tick = self.mask("check")
+            if tick is not None:
+                layers.append((tick, "on-accent", 1, (0, 0)))
+        else:
+            layers = [(outer, "muted", 1, (0, 0)), (inner, "panel", 1, (border, border))]
+        return self.compose(("checkbox", checked, gap), s + gap, s, layers)
+
+    def dot(self, opacity=1.0, diameter=8):
+        """處理中的 glow 圓點（規範 StatusBar）：直徑 8px，放在圖示大小的方塊正中間。"""
+        s, d = self.size, self.theme.px(diameter)
+        c = s / 2
+        mask = self._shape(("dot", s, d), s, s, lambda x, y: (x - c) ** 2 + (y - c) ** 2 <= (d / 2) ** 2)
+        return self._render(s, s, [(mask, "glow", opacity, (0, 0))])
+
+    def _shape(self, key, width, height, inside):
+        if key not in self._masks:
+            self._masks[key] = shape_mask(width, height, inside)
+        return self._masks[key]
+
+    def _render(self, width, height, layers):
+        return render(width, height, [(m, self.theme[color], a, xy) for m, color, a, xy in layers])
+
+    def recolor(self):
+        for image, width, height, layers in self._images.values():
+            if layers:
+                image.configure(data=self._render(width, height, layers))
+
+
+class TreeChevrons:
+    """有階層的清單（資料夾樹）的展開箭頭用線條圖示：收合朝右（chevron-down 轉 90°）、展開朝下、沒有子項目時空白。
+
+    Tk 8.6 的 ttk 元素讀不到項目「展開了沒」（只讀得到沒有子項目的 user2），所以箭頭畫進每一列的圖示裡：
+    image 是「箭頭＋間距＋圖示」，上面疊一個透明的 indicator 元素，點箭頭照樣由 ttk 內建的綁定展開或收合。
+    用法：插入項目時 image=chevrons.image("folder", "closed")；<<TreeviewOpen>>、<<TreeviewClose>> 之後
+    依結果再設一次 "open"／"closed"／"leaf"（這兩個事件發生時 -open 還沒改）。用 style="Treeview" 的清單才有效。"""
+
+    def __init__(self, theme, icons):
+        self.icons = icons
+        self.gap = theme.px(4)
+        s = icons.size
+        # 同一個 Tk 裡第二次建立時（例如測試）元素名稱不能重複
+        name = f"Chevron{sum(1 for e in theme.style.element_names() if e.startswith('Chevron'))}.Treeitem.indicator"
+        theme.style.element_create(name, "image", icons.blank(), sticky="")
+        theme.style.layout("Treeview.Item", [
+            ("Treeitem.padding", {"sticky": "nswe", "children": [
+                ("Treeitem.image", {"side": "left", "sticky": "", "children": [
+                    (name, {"side": "left", "sticky": ""}),
+                ]}),
+                ("Treeitem.focus", {"side": "left", "sticky": "", "children": [
+                    ("Treeitem.text", {"side": "left", "sticky": ""}),
+                ]}),
+            ]}),
+        ])
+        # 子項目的箭頭對齊上一層的圖示
+        theme.style.configure("Treeview", indent=s + self.gap)
+
+    def image(self, icon, state):
+        """state："closed"、"open"、"leaf"（沒有子項目，不畫箭頭）。"""
+        icons, s = self.icons, self.icons.size
+        layers = []
+        if state != "leaf":
+            chevron = icons.mask("chevron-down", 0 if state == "open" else 1)
+            if chevron is not None:
+                layers.append((chevron, "muted", 1, (0, 0)))
+        mask = icons.mask(icon)
+        if mask is not None:
+            layers.append((mask, "muted", 1, (s + self.gap, 0)))
+        return icons.compose(("tree", icon, state), 2 * s + self.gap, s, layers)
+
+
+# ==========================================
 # 元件
 # ==========================================
 def box(parent, theme, bg="panel", **kw):
@@ -297,12 +589,35 @@ class Segmented(tk.Frame):
             self.theme.repaint(text)
 
 
-def checkbox(parent, theme, text, variable, command, image=None, bg="chrome"):
-    return theme.paint(tk.Checkbutton(parent, text=_text(text, image), image=image or "", compound="left",
-                                      variable=variable, command=command, font=FONTS["body"], borderwidth=0,
-                                      highlightthickness=0, cursor="hand2"),
-                       bg=bg, fg="text", activebackground=bg, activeforeground="text", selectcolor="panel",
-                       disabledforeground="disabled")
+def button(parent, theme, text, command, image=None, kind="secondary", bg="panel"):
+    """按鈕（規範 Button）：secondary 是 input 填色、1px line 框；primary 是 accent 填色、on-accent 粗體字，
+    一個畫面最多一個。直接放在 bg 底上的次要按鈕改用 panel 填色（bg="bg"）。有鍵盤焦點時外框換 accent。"""
+    primary = kind == "primary"
+    fill = "accent" if primary else "panel" if bg == "bg" else "input"
+    hover = "accent-hover" if primary else "hover"
+    fg = "on-accent" if primary else "text"
+    btn = tk.Button(parent, text=_text(text, image), image=image or "", compound="left", command=command,
+                    relief=tk.FLAT, borderwidth=0, highlightthickness=1, cursor="hand2",
+                    padx=theme.px(28 if primary else 12), pady=theme.px(5),
+                    font=FONTS["body-strong" if primary else "body"])
+    theme.paint(btn, bg=fill, fg=fg, activebackground=hover, activeforeground=fg, disabledforeground="disabled",
+                highlightbackground="accent" if primary else "line", highlightcolor="accent")
+    btn.bind("<Enter>", lambda e: str(btn["state"]) != "disabled" and btn.configure(bg=theme[hover]))
+    btn.bind("<Leave>", lambda e: theme.repaint(btn))
+    return btn
+
+
+def checkbox(parent, theme, text, variable, command, icons=None, bg="chrome"):
+    """勾選框（規範 Input）：有 icons 時用畫好的方框（圓角、muted 框，勾了 accent 填色），文字在右邊、間距 8px；
+    沒有 icons 時退回 Tk 內建的樣子。點文字也能切換。"""
+    w = tk.Checkbutton(parent, text=text, variable=variable, command=command, font=FONTS["body"], borderwidth=0,
+                       highlightthickness=0, cursor="hand2", compound="left")
+    if icons is not None:
+        gap = theme.px(8)
+        w.configure(image=icons.checkbox(False, gap), selectimage=icons.checkbox(True, gap), indicatoron=False,
+                    relief=tk.FLAT, offrelief=tk.FLAT, overrelief=tk.FLAT, padx=0, pady=theme.px(2))
+    return theme.paint(w, bg=bg, fg="text", activebackground=bg, activeforeground="text",
+                       selectcolor=bg if icons is not None else "panel", disabledforeground="disabled")
 
 
 def entry_box(parent, theme, width, bg="panel", image=None):
@@ -323,6 +638,31 @@ def entry_box(parent, theme, width, bg="panel", image=None):
     return frame, entry
 
 
+def dialog(parent, theme, title):
+    """對話框：panel 底、Esc 關閉。先藏起來，放好內容後呼叫 show_modal()。"""
+    win = tk.Toplevel(parent)
+    win.withdraw()
+    win.title(title)
+    win.resizable(False, False)
+    theme.paint(win, bg="panel")
+    win.bind("<Escape>", lambda e: win.destroy())
+    return win
+
+
+def show_modal(win, parent, theme):
+    """放在主視窗中間偏上、標題列跟著深淺色，關掉之前主視窗不能操作。"""
+    top = parent.winfo_toplevel()
+    win.transient(top)
+    win.update_idletasks()
+    x = top.winfo_rootx() + (top.winfo_width() - win.winfo_reqwidth()) // 2
+    y = top.winfo_rooty() + (top.winfo_height() - win.winfo_reqheight()) // 3
+    win.geometry(f"+{max(0, x)}+{max(0, y)}")
+    win.bind("<Map>", lambda e: e.widget is win and set_title_bar_dark(win, theme.dark), add="+")
+    win.deiconify()
+    win.grab_set()
+    win.focus_set()
+
+
 def popup_menu(root, theme):
     """右鍵選單：panel 底，滑鼠移過 hover 底。每次開啟時建立，所以不用登記。"""
     return tk.Menu(root, tearoff=0, bg=theme["panel"], fg=theme["text"], activebackground=theme["hover"],
@@ -332,14 +672,26 @@ def popup_menu(root, theme):
 
 class StatusBar(tk.Frame):
     """狀態列：chrome 底、上緣 1px line、caption 字。主要那句用 text（提醒 warn、錯誤 hi），後面的數字用 muted。
+    最前面是狀態圖示（一定同時有圖示和字）：
+      busy  處理中：glow 圓點一明一暗，2.2 秒一個週期（Windows 關掉動畫效果時停在最亮）
+      ok    完成：ok 的打勾        warn  提醒：warn 的警告        error  錯誤：hi 的警告
+      info  一般說明：icon 指定的線條圖示（muted），可以省略
     要在主內容之前 pack(side=BOTTOM)，視窗縮小時才不會被擠掉。"""
 
-    KINDS = {"info": "text", "ok": "ok", "warn": "warn", "error": "hi"}
+    TEXT = {"warn": "warn", "error": "hi"}
+    ICONS = {"ok": ("check", "ok"), "warn": ("warning", "warn"), "error": ("warning", "hi")}
     SEP = "｜"
+    PULSE_MS = 2200
+    PULSE_FRAMES = 22
 
-    def __init__(self, parent, theme):
+    def __init__(self, parent, theme, icons=None):
         super().__init__(parent)
         self.theme = theme
+        self.icons = icons
+        self.kind = None
+        self._pulse_after = None
+        self._dot = None
+        self._dot_frames = []
         theme.paint(self, bg="chrome")
         theme.paint(tk.Frame(self, height=1), bg="line").pack(side=tk.TOP, fill=tk.X)
         row = theme.paint(tk.Frame(self, padx=theme.px(12), pady=theme.px(5)), bg="chrome")
@@ -353,18 +705,50 @@ class StatusBar(tk.Frame):
         self.detail.pack(side=tk.LEFT)
         self.parts = (self, row, self.icon, self.main, self.detail)
 
-    def set(self, text, detail="", kind="info", image=None):
+    def set(self, text, detail="", kind="info", icon=None):
+        self.kind = kind
+        self._stop_pulse()
+        image = None
+        if self.icons is not None:
+            if kind == "busy":
+                image = self._start_pulse()
+            elif kind in self.ICONS:
+                image = self.icons.get(*self.ICONS[kind])
+            else:
+                image = self.icons.get(icon)
         if image:
             self.icon.configure(image=image)
             self.icon.pack(side=tk.LEFT, padx=(0, self.theme.px(6)), before=self.main)
         else:
             self.icon.pack_forget()
-        self.theme.paint(self.main, bg="chrome", fg=self.KINDS.get(kind, "text"))
+        self.theme.paint(self.main, bg="chrome", fg=self.TEXT.get(kind, "text"))
         self.main.configure(text=text)
         self.detail.configure(text=f"{self.SEP}{detail}" if detail and text else detail)
 
     def text(self):
         return self.main.cget("text") + self.detail.cget("text")
+
+    def _start_pulse(self):
+        if not self._dot_frames:
+            # 透明度 0.35～1 的餘弦曲線；圓點的顏色深淺色主題相同，所以只算一次
+            self._dot_frames = [self.icons.dot(0.35 + 0.65 * (0.5 + 0.5 * math.cos(2 * math.pi * i / self.PULSE_FRAMES)))
+                                for i in range(self.PULSE_FRAMES)]
+            self._dot = tk.PhotoImage(master=self, data=self._dot_frames[0])
+        if animations_enabled():
+            self._pulse(0)
+        else:
+            self._dot.configure(data=self._dot_frames[0])
+        return self._dot
+
+    def _pulse(self, frame):
+        self._dot.configure(data=self._dot_frames[frame])
+        self._pulse_after = self.after(self.PULSE_MS // self.PULSE_FRAMES,
+                                       lambda: self._pulse((frame + 1) % self.PULSE_FRAMES))
+
+    def _stop_pulse(self):
+        if self._pulse_after:
+            self.after_cancel(self._pulse_after)
+            self._pulse_after = None
 
     def bind_click(self, callback):
         for w in self.parts:

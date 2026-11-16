@@ -97,6 +97,23 @@ def run_self_test(result_path=None) -> int:
                 check("移除最愛", Config(base_dir=tmp).favorites == [] and not app.tree.get_children(app.fav_node),
                       Config(base_dir=tmp).favorites)
 
+                # 資料夾樹的箭頭畫在圖示裡：沒有子項目時不畫，展開後朝下
+                def tree_image(node):
+                    return str(app.tree.item(node, "image")[0])
+                check("資料夾樹：空的分組不畫箭頭",
+                      tree_image(app.fav_node) == str(app.chevrons.image("star", "leaf")), tree_image(app.fav_node))
+                app._add_favorite_path(project)
+                node = app.tree.get_children(app.fav_node)[0]
+                app.tree.focus(node)
+                app.tree.event_generate("<<TreeviewOpen>>")
+                app.tree.item(node, open=True)
+                check("資料夾樹：展開後箭頭朝下、子資料夾收合",
+                      tree_image(node) == str(app.chevrons.image("folder", "open"))
+                      and app.tree.get_children(node)
+                      and tree_image(app.tree.get_children(node)[0]) == str(app.chevrons.image("folder", "closed")),
+                      tree_image(node))
+                app._remove_favorite_path(project)
+
                 # 分頁：新分頁開子資料夾，各分頁的搜尋字互不影響
                 sub = os.path.join(project, "02_設計")
                 app.new_tab(sub)
@@ -145,6 +162,28 @@ def run_self_test(result_path=None) -> int:
                       second != first and colors == (T["bg"][dark], T["chrome"][dark], T["panel"][dark]),
                       (first, second, colors))
                 check("主題記在設定檔", Config(base_dir=tmp).theme == second, Config(base_dir=tmp).theme)
+
+                # 線條圖示：都載入了，切換主題時就地重塗成新主題的 muted
+                names = ("folder", "star", "refresh", "search", "check", "warning", "chevron-down", "sun", "moon",
+                         "calendar", "info", "copy")
+                missing = [n for n in names if app.icons.get(n) is None]
+                check("線條圖示都載入了", not missing, f"缺 {missing}（找的位置：{app.icons.dir}）")
+                mask = app.icons.mask("folder")
+                xy = next(((x, y) for y, row in enumerate(mask.rows) for x, a in enumerate(row) if a == 255), (0, 0))
+                rgb = "#%02X%02X%02X" % tuple(app.icons.get("folder").get(*xy))
+                check("切換主題時圖示跟著重塗", rgb == T["muted"][dark], (rgb, T["muted"][dark]))
+                app.set_status("掃描中…", kind="busy")
+                check("處理中的狀態列有 glow 圓點",
+                      app.status._dot is not None and str(app.status.icon.cget("image")) == str(app.status._dot))
+
+                from core.config import assets_dir
+                from core.version import AUTHOR_URL, VERSION
+                from ui.about import AboutDialog
+                about = AboutDialog(root, app.theme, assets_dir())
+                check("關於視窗有版本、作者網址與系列標誌",
+                      VERSION in about.version_label.cget("text") and about.link.cget("text") == AUTHOR_URL
+                      and about.mark is not None, (about.version_label.cget("text"), assets_dir()))
+                about.win.destroy()
 
                 # 釘選：存進設定檔、不能關、從左邊開資料夾會開在新分頁
                 app.set_tab_pinned(0, True)
