@@ -13,9 +13,16 @@
 
 </div>
 
-![WingLightFinder 畫面](docs/screenshot.png)
+![WingLightFinder 畫面（淺色）](docs/screenshot-light.png)
 
-<sub>畫面中是程式產生的範例資料夾（`tools/make_demo_folder.py`），不是真實案件。</sub>
+<details>
+<summary>深色主題的畫面</summary>
+
+![WingLightFinder 畫面（深色）](docs/screenshot-dark.png)
+
+</details>
+
+<sub>畫面中是程式產生的範例資料夾（`tools/make_screenshots.py`），不是真實案件。</sub>
 
 ## 為什麼做這個
 
@@ -75,6 +82,8 @@ python main.py --self-test     # 自我測試（不顯示視窗）
 ```
 
 打包綠色免安裝版：執行 `打包綠色免安裝版.bat`。它會建立專用的 `.venv`、跑單元測試、依 `WingLightFinder.spec` 用資料夾模式打包，再對成品跑一次自我測試。
+
+介面的線條圖示與 App 圖示來自 WingLight 設計規範的 SVG（`assets/icons_src`、`assets/logos_src`），改了 SVG 才需要重新產生，這幾支要另外安裝 Pillow：`tools/make_icons.py`（線條圖示）、`tools/make_app_icon.py`（App 圖示）、`tools/make_logo_images.py`（「關於」視窗的系列標誌）。程式執行時只讀產生好的 PNG，不需要 Pillow。
 
 ---
 

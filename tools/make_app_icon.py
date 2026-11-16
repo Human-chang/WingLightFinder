@@ -36,7 +36,7 @@ from make_icons import Point, Subpath, draw_round_stroke, parse_path  # noqa: E4
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LOGO_SOURCE_DIR = PROJECT_ROOT / "assets" / "logos_src"
 # 各產品換成自己的 App 圖示 (規範 Logos：winglightpdf.svg、winglightfinder.svg、winglightgis.svg)
-APP_ICON_SVG = LOGO_SOURCE_DIR / "winglightgis.svg"
+APP_ICON_SVG = LOGO_SOURCE_DIR / "winglightfinder.svg"
 LOGO_PNG = PROJECT_ROOT / "assets" / "logo.png"
 APP_ICON_ICO = PROJECT_ROOT / "assets" / "app_icon.ico"
 

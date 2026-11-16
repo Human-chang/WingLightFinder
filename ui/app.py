@@ -110,12 +110,6 @@ class FinderApp:
         root.title(APP_TITLE)
         root.geometry(self.config.geometry or f"{int(1280 * self.scale)}x{int(780 * self.scale)}")
         root.minsize(int(900 * self.scale), int(560 * self.scale))
-        icon = os.path.join(assets_dir(), "app_icon.ico")
-        if os.path.exists(icon):
-            try:
-                root.iconbitmap(default=icon)
-            except tk.TclError:
-                pass
 
         self.tip = Tooltip(root, self.theme)
         self.hover = None           # 滑鼠移過的清單列 (Treeview, item id)
@@ -123,6 +117,7 @@ class FinderApp:
         self.remember_var = tk.BooleanVar(value=remember)
         self.search_var = tk.StringVar()
         self._build_ui()
+        self._set_window_icon()
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         root.bind("<Control-f>", lambda e: self._focus_search())
         root.bind("<F5>", lambda e: self.rescan())
@@ -147,6 +142,17 @@ class FinderApp:
     @property
     def current_folder(self):
         return self.tab.folder
+
+    def _set_window_icon(self):
+        """這個視窗自己的圖示，再設成之後新視窗（例如「關於」）的預設；只呼叫帶 default= 的那次，主視窗的圖示是空的。
+        版面建好之後才設：在 Windows 上設視窗自己的圖示會讓視窗馬上顯示，太早設會先閃一個空白視窗。"""
+        icon = os.path.join(assets_dir(), "app_icon.ico")
+        if os.path.exists(icon):
+            try:
+                self.root.iconbitmap(icon)
+                self.root.iconbitmap(default=icon)
+            except tk.TclError:
+                pass
 
     # ==========================================
     # 版面
