@@ -21,7 +21,7 @@ class ScanDepthTest(unittest.TestCase):
     def test_depth_rule(self):
         self.assertEqual(scan_depth_for("D:\\"), 0)
         self.assertEqual(scan_depth_for("D:\\計畫案"), 2)
-        self.assertEqual(scan_depth_for("D:\\計畫案\\南40線"), 3)
+        self.assertEqual(scan_depth_for("D:\\計畫案\\範例道路工程"), 3)
 
 
 class ScanFolderTest(unittest.TestCase):
@@ -121,13 +121,13 @@ class ConfigTest(unittest.TestCase):
         group = c.add_extension(".ifc")
         self.assertEqual(group["exts"], [".ifc"])
         c.group_states["PDF 報告"] = False
-        c.tabs = ["D:\\計畫案", "E:\\南40線"]
+        c.tabs = ["D:\\計畫案", "E:\\範例道路工程"]
         c.active_tab = 1
         c.save()
 
         c2 = Config(base_dir=self.dir)
         self.assertEqual(c2.favorites, ["D:\\計畫案"])
-        self.assertEqual(c2.tabs, ["D:\\計畫案", "E:\\南40線"])
+        self.assertEqual(c2.tabs, ["D:\\計畫案", "E:\\範例道路工程"])
         self.assertEqual(c2.active_tab, 1)
         names = {g["name"]: g["on"] for g in c2.groups()}
         self.assertFalse(names["PDF 報告"])
@@ -145,17 +145,17 @@ class ConfigTest(unittest.TestCase):
         c = Config(base_dir=self.dir)
         self.assertTrue(c.remember_session)
         c.pinned_tabs = ["D:\\常用"]
-        c.tabs = ["E:\\南40線"]
+        c.tabs = ["E:\\範例道路工程"]
         c.save()
         c2 = Config(base_dir=self.dir)
         self.assertEqual(c2.pinned_tabs, ["D:\\常用"])
-        self.assertEqual(c2.tabs, ["E:\\南40線"])
+        self.assertEqual(c2.tabs, ["E:\\範例道路工程"])
 
     def test_not_remembering_keeps_only_pinned_tabs(self):
         c = Config(base_dir=self.dir)
         c.add_extension(".ifc")
         c.pinned_tabs = ["D:\\常用"]
-        c.tabs = ["E:\\南40線"]
+        c.tabs = ["E:\\範例道路工程"]
         c.active_tab = 1
         c.favorites.append("D:\\計畫案")
         c.remember_session = False
